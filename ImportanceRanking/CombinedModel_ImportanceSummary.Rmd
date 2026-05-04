@@ -1,0 +1,48 @@
+---
+title: "Combined Model - Variable Importance Summary"
+output: html_document
+---
+
+This notebook loads the per-run permutation importance scores from the 100-run combined (climate + phenology) random forest produced by the *Climate & Phenology Combined Ranger Models - 100 Run Loop* notebook, and summarises mean and SD of permutation importance per variable across all 100 runs. The summary table is exported as a CSV for use in the *Combined Model - Variable Importance Plot* notebook.
+
+---
+
+## Load the packages required for data handling.
+
+```{r}
+library(data.table)
+```
+
+---
+
+## Read in the saved per-run variable importance scores from the 100-run combined model.
+
+```{r}
+pull_dir    <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+save_dir    <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/ImportanceRanks'
+results_imp <- fread(file.path(pull_dir, "AllCombinedModelImportance.csv"))
+```
+
+---
+
+## Summarise variable importance across all 100 runs by computing mean, SD, and 95% CI of permutation importance per variable, ordered from most to least important. A rank column is assigned based on this order.
+
+```{r}
+imp_summary <- results_imp[, .(
+  mean_importance  = mean(perm_importance),
+  sd_importance    = sd(perm_importance),
+  ci95_importance  = qt(0.975, df = .N - 1) * sd(perm_importance) / sqrt(.N)
+), by = variable][order(mean_importance, decreasing = TRUE)]
+
+imp_summary[, rank := .I]
+
+print(imp_summary)
+```
+
+---
+
+## Export the variable importance summary table as a CSV.
+
+```{r}
+fwrite(imp_summary, file.path(save_dir, "CombinedModelImportanceSummary.csv"))
+```

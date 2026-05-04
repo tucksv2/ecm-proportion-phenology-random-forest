@@ -1,0 +1,142 @@
+---
+title: "Combined Model - Variable Importance Plot"
+output: html_document
+---
+
+This notebook reads the variable importance summary produced by the *Combined Model - Variable Importance Summary* notebook and produces an importance plot for the top variables. The raw per-run importance scores are also read in to provide the jittered run-level data points.
+
+Variable labels on the y-axis are colour-coded by type: blue for climate (BIO) variables and green for phenology variables. Individual run importance values are shown as jittered points, with mean ± SD overlaid in red. The plot is exported to the importance ranks output directory.
+
+---
+
+## Load the packages required for data handling and plotting.
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(ggtext)
+```
+
+---
+
+## Read in the variable importance summary and the raw per-run importance scores. The summary provides the mean and SD used for the error bars; the raw scores are used for the jittered points.
+
+```{r}
+pull_dir    <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+save_dir    <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/ImportanceRanks'
+imp_summary <- fread(file.path(save_dir, "CombinedModelImportanceSummary.csv"))
+results_imp <- fread(file.path(pull_dir, "AllCombinedModelImportance.csv"))
+```
+
+---
+
+## Rename phenology variables to remove the season indicator ' 1 ' and drop ' Mean' from mean variable names, leaving SD variables labelled with ' SD' only.
+
+```{r}
+rename_pheno <- function(v) {
+  is_pheno <- !grepl("^BIO_", v)
+  v[is_pheno] <- gsub(" 1 Mean$", "",    v[is_pheno])  # "X 1 Mean" → "X"
+  v[is_pheno] <- gsub(" 1 SD$",   " SD", v[is_pheno])  # "X 1 SD"   → "X SD"
+  v
+}
+
+imp_summary[, variable := rename_pheno(variable)]
+results_imp[, variable := rename_pheno(variable)]
+```
+
+---
+
+## Define a helper function to clean variable names for axis labels. Removes the BIO_ prefix from climate variables.
+
+```{r}
+clean_var_name <- function(v) gsub("^BIO_\\d+\\s+", "", v)
+```
+
+---
+
+## Build the variable importance plot for the top variables. Jittered points show individual run values in original permutation importance units; red points and error bars show mean ± 95% CI across runs. Y-axis labels are coloured by variable type and rendered via `ggtext`.
+
+```{r fig.width=14, fig.height=12}
+# Subset to top variables and extract their per-run values for jittering
+most_imp        <- head(imp_summary, 57)
+most_imp_jitter <- results_imp[variable %in% most_imp$variable]
+
+# Label each variable as Climate or Phenology for colour mapping in the legend
+most_imp_jitter[, var_type := ifelse(grepl("^BIO_", variable), "Climate", "Phenology")]
+
+# Build coloured axis labels: BIO variables in blue, phenology in green
+# Rank is shown in brackets at the start; phenology variables are prefixed with *
+# Labels are wrapped in a <span> tag so ggtext can render the colour in the axis
+make_html_label <- function(v, rank) {
+  is_pheno <- !grepl("^BIO_", v)
+  colour   <- ifelse(is_pheno, "#4caf50", "blue")
+  prefix   <- ""
+  paste0("<span style='color:black; font-weight:bold'>(", rank, ") </span>",
+         "<span style='color:", colour, "; font-weight:bold'>", prefix, clean_var_name(v), "</span>")
+}
+
+# Build a named lookup so both most_imp and most_imp_jitter get identical labels
+label_lookup <- setNames(
+  mapply(make_html_label, most_imp$variable, most_imp$rank),
+  most_imp$variable
+)
+
+# Order variables ascending by importance so that coord_flip() places the most
+# important variable at the top; set as a factor so all geoms share the same axis order
+var_order   <- most_imp[order(mean_importance, decreasing = TRUE), variable]
+html_levels <- label_lookup[var_order]
+
+most_imp[,        label_html := factor(label_lookup[variable], levels = html_levels)]
+most_imp_jitter[, label_html := factor(label_lookup[variable], levels = html_levels)]
+
+
+importance_plot <- ggplot() +
+  # Jittered points show per-run permutation importance in original units
+  geom_jitter(data = most_imp_jitter,
+              aes(x = label_html, y = perm_importance, colour = var_type),
+              width = 0.2, alpha = 0.3, size = 1) +
+  # Error bars span mean ± 95% CI in original permutation importance units
+  geom_errorbar(data = most_imp,
+                aes(x = label_html,
+                    ymin = mean_importance - ci95_importance,
+                    ymax = mean_importance + ci95_importance),
+                colour = "black", width = 0.5, linewidth = 1.2) +
+  # Red point marks the mean permutation importance for each variable
+  geom_point(data = most_imp,
+             aes(x = label_html, y = mean_importance),
+             colour = "red", size = 1) +
+  # Colour scale maps variable type to the same colours used in the axis labels
+  scale_colour_manual(values = c("Climate" = "steelblue", "Phenology" = "#4caf50"),
+                      name = "Variable type") +
+  # Override legend aesthetics so points are visible at full opacity
+  guides(colour = guide_legend(override.aes = list(size = 4, alpha = 1))) +
+  scale_y_continuous(limits = c(0, NA)) +
+  coord_flip() +
+  labs(x = NULL, y = "Mean Permutation Importance ± 95% CI") +
+  theme_minimal() +
+  # axis.text.y uses element_markdown to render the colour tags in axis labels
+  theme(
+    plot.title        = element_text(size = 15),
+    axis.title        = element_text(size = 15),
+    axis.text.x       = element_text(size = 13),
+    axis.text.y       = element_markdown(size = 14),
+    legend.title      = element_text(size = 15),
+    legend.text       = element_text(size = 14),
+    axis.line         = element_line(colour = "black", linewidth = 0.5),
+    axis.ticks        = element_line(colour = "black"),
+    axis.ticks.length = unit(3, "pt")
+  )
+
+print(importance_plot)
+```
+
+---
+
+## Export the variable importance plot as a PNG.
+
+```{r}
+ggsave(file.path(save_dir, "CombinedModel_ImportancePlot.png"),
+       plot   = importance_plot,
+       width  = 14,
+       height = 12)
+```

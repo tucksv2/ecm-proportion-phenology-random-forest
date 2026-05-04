@@ -1,0 +1,275 @@
+---
+title: "Combined Model — Backward Elimination Variable Importance"
+output: html_document
+---
+
+This notebook performs backward elimination on the combined (climate + phenology) random forest predictor set. Starting from the full 57-variable model, variables are removed one batch at a time in reverse importance order (least important first), using the importance ranks from the *Combined Model — Variable Importance Summary* notebook. A single ranger model is fit at each elimination step using a randomly selected seed from the climate model loop. OOB R² and RMSE are recorded at every step to identify the variable subset that maximises predictive performance.
+
+The removal schedule checks at: 57 → 47 → 37 → 32 → 30, then removes one variable at a time from 30 down to 1.
+
+---
+
+## Load the packages required for modelling, data handling, and plotting.
+
+```{r}
+library(data.table)
+library(ranger)
+library(ggplot2)
+```
+
+---
+
+## Define file paths for input data and output artefacts.
+
+```{r}
+model_dir  <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+data_dir   <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing'
+imp_dir    <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/ImportanceRanks'
+```
+
+---
+
+## Load the modelling dataset, climate model run statistics, and combined model importance summary.
+
+```{r}
+model_df    <- fread(file.path(data_dir, "Modelling_Data.csv"))
+clim_stats  <- fread(file.path(model_dir, "AllClimateModelStats.csv"))
+imp_summary <- fread(file.path(imp_dir,   "CombinedModelImportanceSummary.csv"))
+```
+
+---
+
+## Select a seed at random from the climate model loop runs.
+
+```{r}
+random_run   <- clim_stats[sample(.N, 1)]
+elim_seed <- random_run$seed
+
+cat(sprintf("Selected run: %d  |  seed: %d  |  R² = %.4f\n",
+            rep_run$run, elim_seed, rep_run$r_squared))
+```
+
+---
+
+## Build the ordered predictor list: all combined-model variables sorted from least to most important. The backward elimination loop will remove from the front of this list.
+
+```{r}
+# Full combined predictor set (same definition as CombinedRangerModelLoop.Rmd)
+all_vars <- setdiff(names(model_df), c("cell", "propEcM"))
+
+# Order importance summary to match and sort worst-first (highest rank number = least important)
+imp_ordered <- imp_summary[variable %in% all_vars][order(-rank)]
+
+# Verify all predictors are accounted for in the importance summary
+if (nrow(imp_ordered) != length(all_vars)) {
+  warning(sprintf(
+    "%d predictors in model_df but %d in importance summary — check for mismatches.",
+    length(all_vars), nrow(imp_ordered)
+  ))
+}
+
+# Variables in elimination order: first element is removed first (least important)
+elim_order <- imp_ordered$variable
+
+cat(sprintf("Total predictors: %d\n", length(elim_order)))
+cat("First 5 to be removed (least important):\n")
+print(head(elim_order, 5))
+cat("Last 5 to be removed (most important):\n")
+print(tail(elim_order, 5))
+```
+
+---
+
+## Define the elimination checkpoints as the number of variables remaining at each step.
+
+```{r}
+n_vars <- length(elim_order)
+
+# Variables remaining at each checkpoint: 57→47→37→32→30, then 29 down to 1 one at a time
+remaining_schedule <- c(57, 47, 37, 32, 30, seq(29, 1, by = -1))
+
+# Convert to number removed at each checkpoint
+checkpoints <- as.integer(n_vars - remaining_schedule)
+
+cat(sprintf("Elimination checkpoints (n remaining): %s\n",
+            paste(remaining_schedule, collapse = ", ")))
+cat(sprintf("Total model fits: %d\n", length(checkpoints)))
+```
+
+---
+
+## Run a single ranger model at each elimination checkpoint. At each step the least-important remaining variables are dropped and the model is re-fit on the reduced predictor set.
+
+```{r}
+ntree  <- 500
+ncores <- 6
+
+elim_results <- vector("list", length(checkpoints))
+
+for (k in seq_along(checkpoints)) {
+
+  n_removed     <- checkpoints[k]
+  active_vars   <- if (n_removed == 0) elim_order else elim_order[-(1:n_removed)]
+  n_active      <- length(active_vars)
+
+  m <- ranger(
+    x            = model_df[, ..active_vars],
+    y            = model_df$propEcM,
+    num.trees    = ntree,
+    num.threads  = ncores,
+    write.forest = FALSE,
+    seed         = elim_seed
+  )
+
+  elim_results[[k]] <- data.frame(
+    step       = k,
+    n_removed  = n_removed,
+    n_vars     = n_active,
+    r_squared  = m$r.squared,
+    mse        = m$prediction.error,
+    rmse       = sqrt(m$prediction.error)
+  )
+
+  message(sprintf("Step %2d/%d  |  %d vars remaining  |  R² = %.4f  |  RMSE = %.5f",
+                  k, length(checkpoints), n_active,
+                  m$r.squared, sqrt(m$prediction.error)))
+}
+
+elim_dt <- rbindlist(elim_results)
+```
+
+---
+
+## Report the optimal variable subsets: the step with the highest OOB R² and the step with the lowest OOB RMSE.
+
+```{r}
+best_r2   <- elim_dt[which.max(r_squared)]
+best_rmse <- elim_dt[which.min(rmse)]
+
+cat("Optimal subset by highest R²:\n")
+cat(sprintf("  Variables remaining: %d  |  R² = %.4f  |  RMSE = %.5f\n\n",
+            best_r2$n_vars, best_r2$r_squared, best_r2$rmse))
+
+cat("Optimal subset by lowest RMSE:\n")
+cat(sprintf("  Variables remaining: %d  |  R² = %.4f  |  RMSE = %.5f\n\n",
+            best_rmse$n_vars, best_rmse$r_squared, best_rmse$rmse))
+
+# Variables retained at the best-R² step
+n_kept_r2   <- best_r2$n_removed
+active_at_best_r2 <- if (n_kept_r2 == 0) elim_order else elim_order[-(1:n_kept_r2)]
+cat(sprintf("Variables retained at best-R² step (%d vars):\n", length(active_at_best_r2)))
+print(active_at_best_r2)
+```
+
+---
+
+## Save the per-step results table as a CSV.
+
+```{r}
+fwrite(elim_dt, file.path(imp_dir, "BackwardElimination_Results.csv"))
+```
+
+---
+
+## Define the shared plot function and phase boundaries.
+
+```{r}
+# Phase boundary x-positions (n_vars remaining at each step-size change)
+phase_boundaries <- elim_dt$n_vars[elim_dt$n_removed %in% c(10L, 20L, 25L, 27L)]
+
+make_elim_plot <- function(data, y_col, y_label, best_row, fill_col, point_col) {
+
+  best_x <- best_row$n_vars
+  best_y <- best_row[[y_col]]
+
+  annot_label <- sprintf("n = %d\n%s = %.4f", best_x, y_label, best_y)
+
+  nudge_y <- if (y_col == "r_squared") -diff(range(data[[y_col]])) * 0.10
+             else                        diff(range(data[[y_col]])) * 0.10
+
+  ggplot(data, aes(x = n_vars, y = .data[[y_col]])) +
+
+    geom_vline(xintercept = phase_boundaries,
+               linetype = "dashed", colour = "grey60", linewidth = 0.5) +
+
+    geom_line(colour = "grey30", linewidth = 0.7) +
+    geom_point(colour = "grey30", fill = fill_col,
+               size = 2.5, shape = 21, stroke = 0.5) +
+
+    geom_point(data = best_row, aes(x = n_vars, y = .data[[y_col]]),
+               colour = point_col, fill = point_col,
+               size = 4, shape = 21, stroke = 1.2) +
+    annotate("text",
+             x = best_x, y = best_y + nudge_y,
+             label = annot_label,
+             hjust = 0.5, size = 3.5, colour = point_col, lineheight = 1.3) +
+
+    scale_x_continuous(
+      name   = "Number of variables",
+      breaks = data$n_vars
+    ) +
+    labs(y = y_label) +
+    theme_bw(base_size = 12) +
+    theme(
+      panel.grid.minor = element_blank(),
+      axis.title       = element_text(size = 11),
+      axis.text.x      = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 8)
+    )
+}
+```
+
+---
+
+## Plot OOB R² as a function of the number of variables remaining.
+
+```{r fig.width=12, fig.height=5}
+p_r2 <- make_elim_plot(
+  data      = elim_dt,
+  y_col     = "r_squared",
+  y_label   = "OOB R²",
+  best_row  = best_r2,
+  fill_col  = "#cce5ff",
+  point_col = "steelblue4"
+)
+
+p_r2
+```
+
+---
+
+## Plot OOB RMSE as a function of the number of variables remaining.
+
+```{r fig.width=12, fig.height=5}
+p_rmse <- make_elim_plot(
+  data      = elim_dt,
+  y_col     = "rmse",
+  y_label   = "OOB RMSE",
+  best_row  = best_rmse,
+  fill_col  = "#ffd6cc",
+  point_col = "firebrick3"
+)
+
+p_rmse
+```
+
+---
+
+## Save the R² and RMSE plots as PNGs.
+
+```{r}
+ggsave(
+  filename = file.path(imp_dir, "BackwardElimination_R2.png"),
+  plot     = p_r2,
+  width    = 12,
+  height   = 5,
+  dpi      = 300
+)
+
+ggsave(
+  filename = file.path(imp_dir, "BackwardElimination_RMSE.png"),
+  plot     = p_rmse,
+  width    = 12,
+  height   = 5,
+  dpi      = 300
+)
+```
