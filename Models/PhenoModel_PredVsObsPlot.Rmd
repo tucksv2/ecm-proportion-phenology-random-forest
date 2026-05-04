@@ -1,0 +1,183 @@
+---
+title: "Phenology Model - Predicted vs Observed Plot"
+output: html_document
+---
+
+This notebook loads the OOB predictions and model statistics from the 100-run phenology random forest produced by the *Phenology Ranger Models - 100 Run Loop* notebook, and produces a predicted vs observed plot for `propEcM`. Per-cell mean and SD of predicted `propEcM` are computed across all 100 runs before plotting.
+
+The plot uses a hexbin density layer to handle the large number of cells, with a fitted regression line and a 1:1 reference line overlaid. Mean R² and RMSE across the 100 runs are annotated on the plot. A binned RMSE plot is also produced, with separate bins for cells with observed propEcM of exactly 0 or 1, and 0.05-width bins for intermediate values. The figure is exported as a PNG to the model outputs directory.
+
+---
+
+## Load the packages required for data handling and plotting.
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(hexbin)
+library(geomtextpath)
+```
+
+---
+
+## Read in the saved model statistics and OOB predictions from the 100-run phenology model.
+
+```{r}
+save_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+
+results_stats <- fread(file.path(save_dir, "AllPhenoModelStats.csv"))
+results_preds <- fread(file.path(save_dir, "AllPhenoModelPredictions.csv"))
+```
+
+---
+
+## Compute per-cell mean and SD of predicted `propEcM` across all 100 runs, and derive summary model performance statistics.
+
+```{r}
+# Aggregate predictions to per-cell means and SDs across runs
+mean_preds <- results_preds[, .(
+  observed     = mean(observed),
+  predicted    = mean(predicted),
+  predicted_sd = sd(predicted)
+), by = cell]
+
+# Compute mean R² and RMSE across the 100 runs for annotation
+r2   <- round(mean(results_stats$r_squared), 3)
+rmse <- round(sqrt(mean(results_stats$prediction_error)), 3)
+
+# Compute agreement statistics on per-cell mean predictions
+lm_fit    <- lm(predicted ~ observed, data = mean_preds)
+slope     <- round(coef(lm_fit)[2], 3)
+intercept <- round(coef(lm_fit)[1], 3)
+bias      <- round(mean(mean_preds$predicted - mean_preds$observed), 3)
+
+eq_label <- paste0("lm  y = ", slope, "x ", ifelse(intercept >= 0, "+ ", "- "), abs(intercept))
+```
+
+---
+
+## Bin observed values with separate bins for exactly 0 and 1, and 0.05-width bins for intermediates, then compute RMSE per bin and plot.
+
+```{r}
+breaks_interior <- seq(0, 1, by = 0.05)
+
+mean_preds[, obs_bin := fcase(
+  observed == 0, "0",
+  observed == 1, "1",
+  default = as.character(cut(observed, breaks = breaks_interior,
+                             include.lowest = FALSE, right = TRUE))
+)]
+
+# Assign the same bins to raw per-run predictions
+results_preds[, obs_bin := fcase(
+  observed == 0, "0",
+  observed == 1, "1",
+  default = as.character(cut(observed, breaks = breaks_interior,
+                             include.lowest = FALSE, right = TRUE))
+)]
+
+# RMSE per bin per run, then summarise across 100 runs
+bin_rmse_by_run <- results_preds[, .(
+  RMSE = sqrt(mean((predicted - observed)^2))
+), by = .(obs_bin, run)]
+
+bin_meta <- mean_preds[, .(bin_mid = mean(observed), n_cells = .N), by = obs_bin]
+
+bin_errors <- bin_rmse_by_run[, .(
+  RMSE    = mean(RMSE),
+  RMSE_sd = sd(RMSE),
+  CI95_lo = mean(RMSE) - qt(0.975, df = .N - 1) * sd(RMSE) / sqrt(.N),
+  CI95_hi = mean(RMSE) + qt(0.975, df = .N - 1) * sd(RMSE) / sqrt(.N)
+), by = obs_bin]
+
+bin_errors <- merge(bin_errors, bin_meta, by = "obs_bin")[order(bin_mid)]
+bin_errors[, is_boundary := obs_bin %in% c("0", "1")]
+
+binned_error_plot <- ggplot(bin_errors, aes(x = bin_mid, y = RMSE)) +
+  geom_col(data = bin_errors[is_boundary == FALSE],
+           width = 0.038, fill = "#7b2d8b", colour = NA) +
+  geom_line(linewidth = 0.8, colour = "#f28c50") +
+  geom_point(size = 3, shape = 18, colour = "#f28c50") +
+  geom_errorbar(aes(ymin = CI95_lo, ymax = CI95_hi),
+                width = 0.015, linewidth = 0.4, colour = "#f28c50") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1)) +
+  coord_cartesian(ylim = c(0, 0.4)) +
+  labs(x = "Observed propEcM",
+       y = "RMSE") +
+  theme_minimal() +
+  theme(
+    axis.line         = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks        = element_line(colour = "black"),
+    axis.ticks.length = unit(3, "pt")
+  )
+
+print(binned_error_plot)
+
+ggsave(file.path(save_dir, "PhenoModel_BinnedRMSEPlot.png"),
+       plot   = binned_error_plot,
+       width  = 9,
+       height = 6)
+```
+
+---
+
+## Compute a per-bin RMSE table with SD and 95% CI across the 100 runs, and export as CSV.
+
+```{r}
+knitr::kable(
+  bin_errors[, .(
+    Bin     = obs_bin,
+    n_cells = n_cells,
+    RMSE    = round(RMSE,    4),
+    SD      = round(RMSE_sd, 4),
+    CI95_lo = round(CI95_lo, 4),
+    CI95_hi = round(CI95_hi, 4)
+  )],
+  caption = "Per-bin RMSE — mean, SD, and 95% CI across 100 phenology model runs"
+)
+
+fwrite(
+  bin_errors[, .(obs_bin, bin_mid, n_cells, RMSE, RMSE_sd, CI95_lo, CI95_hi)],
+  file.path(save_dir, "PhenoModel_BinnedRMSETable.csv")
+)
+```
+
+---
+
+## Build the predicted vs observed plot. Hexbin density is used to handle the large number of cells. The dashed red line is the 1:1 ideal and the white line is the fitted linear model. R² and RMSE are annotated in the plot area.
+
+```{r}
+pred_obs_plot <- ggplot(mean_preds, aes(x = observed, y = predicted)) +
+  geom_hex(bins = 80) +
+  scale_fill_viridis_c(option = "magma", name = "No. of Cells ", trans = "log10") +
+  geom_textsmooth(method = "lm", label = eq_label, colour = "white",
+                linewidth = 0.8, se = FALSE, hjust = 0.05, vjust = -0.5) +
+  geom_textabline(intercept = 0, slope = 1, label = "1:1",
+                colour = "red", linetype = "dashed", linewidth = 0.8, hjust = 0.123, vjust = -0.5) +
+  annotate("text", x = 0.68, y = 0.38,
+           label = paste0("R² = ", r2, "\nRMSE = ", rmse),
+           hjust = 0, vjust = 0, size = 4, colour = "white") +
+  scale_x_continuous(breaks = seq(0, 1, 0.1), minor_breaks = seq(0, 1, 0.05)) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(x = "Observed propEcM",
+       y = "Mean Predicted propEcM (100 runs)") +
+  theme_minimal() +
+  theme(
+    axis.line         = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks        = element_line(colour = "black"),
+    axis.ticks.length = unit(3, "pt")
+  )
+
+print(pred_obs_plot)
+```
+
+---
+
+## Export the predicted vs observed plot as a PNG to the model outputs directory.
+
+```{r}
+ggsave(file.path(save_dir, "PhenoModel_PredVsObsPlot.png"),
+       plot   = pred_obs_plot,
+       width  = 9,
+       height = 6)
+```

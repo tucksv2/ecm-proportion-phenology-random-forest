@@ -1,0 +1,127 @@
+---
+title: "Residual Ranger Models - 100 Run Loop"
+output: html_document
+---
+
+This notebook fits 100 independent random forest models using the `ranger` package, each predicting climate-residual ectomycorrhizal proportion (`residualEcM`) from the 38 phenology summary variables only. The residual approach isolates the variance in `propEcM` that is not explained by climate: per-cell residuals are computed as observed `propEcM` minus mean predicted `propEcM` from the 100-run climate model produced by the *Climate Ranger Models - 100 Run Loop* notebook. These residuals become the response variable, with phenology as the sole predictor set.
+
+Each model is fit with a unique reproducible seed drawn from a fixed random sequence. Running multiple independent models with different seeds captures variability in out-of-bag (OOB) performance arising from the stochastic nature of random forest fitting, providing a more stable estimate of model behaviour than a single run. Per-model summary statistics and OOB predictions are collected and exported as CSVs.
+
+---
+
+## Load the packages required for modelling and data handling.
+
+```{r}
+library(data.table)
+library(ranger)
+```
+
+---
+
+## Read in the modelling dataset and the saved OOB predictions from the 100-run climate model.
+
+```{r}
+model_df <- fread('/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing/Modelling_Data.csv')
+
+save_dir    <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+
+climate_preds <- fread(file.path(save_dir, "AllClimateModelPredictions.csv"))
+```
+
+---
+
+## Compute per-cell mean predicted `propEcM` across all 100 climate model runs, then calculate `residualEcM` as observed minus mean predicted.
+
+```{r}
+# Average climate model predictions across runs for each cell
+cell_means <- climate_preds[, .(
+  mean_climate_predicted = mean(predicted),
+  observed               = mean(observed)
+), by = cell]
+
+# Compute the residual as the difference between observed and climate-predicted propEcM
+cell_means[, residualEcM := observed - mean_climate_predicted]
+```
+
+---
+
+## Merge `residualEcM` into the modelling dataset so phenology predictors are aligned by cell.
+
+```{r}
+model_df <- merge(model_df, cell_means[, .(cell, residualEcM)], by = "cell")
+```
+
+---
+
+## Define the phenology-only predictor set by excluding the cell identifier, both response variables, and all BIO climate columns.
+
+```{r}
+predictor_vars <- setdiff(names(model_df), c("cell", "propEcM", "residualEcM"))
+predictor_vars <- predictor_vars[!grepl("^BIO_", predictor_vars)]
+print(predictor_vars)
+```
+
+---
+
+## Run 100 independent ranger models with `residualEcM` as the response and the phenology predictor set. Each run uses a unique reproducible seed. Per-run summary statistics and OOB predictions are collected into lists and combined into dataframes at the end of the loop.
+
+```{r}
+# Set fixed model parameters
+ntree      <- 500
+ncores     <- 7
+n_runs     <- 100
+set.seed(22)
+base_seeds <- sample.int(1e6, n_runs) # draw n_runs unique seeds for reproducibility
+
+# Initialise storage lists for stats and predictions
+run_stats  <- vector("list", n_runs)
+pred_list  <- vector("list", n_runs)
+
+for (i in seq_len(n_runs)) {
+
+  seed_i <- base_seeds[i]
+
+  m <- ranger(
+    x            = model_df[, ..predictor_vars],
+    y            = model_df$residualEcM,
+    num.trees    = ntree,
+    num.threads  = ncores,
+    write.forest = FALSE, # forest object not needed; suppressing saves memory
+    seed         = seed_i
+  )
+
+  # Collect model-level summary statistics for this run
+  run_stats[[i]] <- data.frame(
+    run              = i,
+    seed             = seed_i,
+    r_squared        = m$r.squared,
+    prediction_error = m$prediction.error,
+    num_trees        = m$num.trees,
+    mtry             = m$mtry
+  )
+
+  # Collect OOB predictions alongside observed residuals for this run
+  pred_list[[i]] <- data.frame(
+    run       = i,
+    seed      = seed_i,
+    cell      = model_df$cell,
+    observed  = model_df$residualEcM,
+    predicted = m$predictions
+  )
+
+  if (i %% 10 == 0) message("Completed run ", i, "/", n_runs) # progress tracker
+}
+
+# Combine per-run results into single dataframes
+results_stats <- rbindlist(run_stats)
+results_preds <- rbindlist(pred_list)
+```
+
+---
+
+## Export the per-run model statistics and OOB predictions as CSVs.
+
+```{r}
+fwrite(results_stats, file.path(save_dir, "AllResidualModelStats.csv"))
+fwrite(results_preds, file.path(save_dir, "AllResidualModelPredictions.csv"))
+```

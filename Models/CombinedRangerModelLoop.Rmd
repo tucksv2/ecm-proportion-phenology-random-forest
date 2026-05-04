@@ -1,0 +1,116 @@
+---
+title: "Climate & Phenology Combined Ranger Models - 100 Run Loop"
+output: html_document
+---
+
+This notebook fits 100 independent random forest models using the `ranger` package, each predicting ectomycorrhizal proportion (`propEcM`) from the full predictor set of 38 phenology summary variables and 19 WorldClim bioclimate variables. Including both predictor types allows the combined explanatory power of climate and phenology to be assessed. The input is the modelling dataframe produced by the *Creating a Modelling Dataframe* notebook.
+
+Each model is fit with a unique reproducible seed drawn from a fixed random sequence. For each run, per-model summary statistics, OOB predictions, and permutation-based variable importance values and ranks are collected and exported as CSVs.
+
+---
+
+## Load the packages required for modelling and data handling.
+
+```{r}
+library(data.table)
+library(ranger)
+library(ggplot2)
+```
+
+---
+
+## Read in the modelling dataset produced by the *Creating a Modelling Dataframe* notebook. All NA rows have been removed and columns are labelled — no further preprocessing is required.
+
+```{r}
+model_df <- fread('/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing/Modelling_Data.csv')
+```
+
+---
+
+## Define the predictor set as all columns except the cell identifier and response variable.
+
+```{r}
+predictor_vars <- setdiff(names(model_df), c("cell", "propEcM"))
+```
+
+---
+
+## Run 100 independent ranger models using the full predictor set. Each run uses a unique reproducible seed. Per-run summary statistics, OOB predictions, and variable importance values and ranks are collected into lists and combined into dataframes at the end of the loop.
+
+```{r}
+# Set fixed model parameters
+ntree      <- 500
+ncores     <- 7
+n_runs     <- 100
+set.seed(22)
+base_seeds <- sample.int(1e6, n_runs) # draw n_runs unique seeds for reproducibility
+
+# Initialise storage lists for stats, predictions, and importance
+run_stats  <- vector("list", n_runs)
+pred_list  <- vector("list", n_runs)
+imp_list   <- vector("list", n_runs)
+
+for (i in seq_len(n_runs)) {
+
+  seed_i <- base_seeds[i]
+
+  m <- ranger(
+    x            = model_df[, ..predictor_vars],
+    y            = model_df$propEcM,
+    num.trees    = ntree,
+    importance   = "permutation", # permutation importance computed for each variable
+    num.threads  = ncores,
+    write.forest = FALSE, # forest object not needed; suppressing saves memory
+    seed         = seed_i
+  )
+
+  # Collect model-level summary statistics for this run
+  run_stats[[i]] <- data.frame(
+    run              = i,
+    seed             = seed_i,
+    r_squared        = m$r.squared,
+    prediction_error = m$prediction.error,
+    num_trees        = m$num.trees,
+    mtry             = m$mtry
+  )
+
+  # Collect OOB predictions alongside observed values for this run
+  pred_list[[i]] <- data.frame(
+    run        = i,
+    seed       = seed_i,
+    cell       = model_df$cell,
+    observed   = model_df$propEcM,
+    predicted  = m$predictions
+  )
+
+  # Collect variable importance values and ranks for this run
+  imp_vals <- m$variable.importance
+  imp_list[[i]] <- data.frame(
+    run             = i,
+    seed            = seed_i,
+    variable        = names(imp_vals),
+    perm_importance = imp_vals,
+    imp_rank        = rank(-imp_vals, ties.method = "min"), # rank 1 = most important
+    row.names       = NULL
+  )
+
+  if (i %% 10 == 0) message("Completed run ", i, "/", n_runs) # progress tracker
+}
+
+# Combine per-run results into single dataframes
+results_stats <- rbindlist(run_stats)
+results_preds <- rbindlist(pred_list)
+results_imp   <- rbindlist(imp_list)
+```
+
+---
+
+## Export the per-run model statistics, OOB predictions, and variable importance scores as CSVs.
+
+```{r}
+save_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+
+fwrite(results_stats, file.path(save_dir, "AllCombinedModelStats.csv"))
+fwrite(results_preds, file.path(save_dir, "AllCombinedModelPredictions.csv"))
+fwrite(results_imp,   file.path(save_dir, "AllCombinedModelImportance.csv"))
+```
