@@ -1,0 +1,217 @@
+---
+title: "Combined Model — Partial Dependence Plot"
+output: html_document
+---
+
+This notebook reads the partial dependence data produced by the *Combined Model — Partial Dependence Calculation* notebook and assembles a 2×4 plot matrix. Climate variables form the top row (blue border) and phenology variables the bottom row (green border). Each panel shows the partial dependence curve for the most representative model run. All panels share a fixed y-axis range. The assembled figure is exported as a PNG.
+
+---
+
+## Load the packages required for data handling and plotting.
+
+```{r}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(stringr)
+library(grid)
+```
+
+---
+
+## Define the file path for the partial dependence outputs directory.
+
+```{r}
+output_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/PartialDependencePlots'
+```
+
+---
+
+## Load the saved PDP results, selected variable metadata, and breakpoints. Separate the selected variables into climate and phenology subsets ordered by importance.
+
+```{r}
+pdp_results <- fread(file.path(output_dir, "pdp_results.csv"))
+top_vars    <- fread(file.path(output_dir, "top_vars.csv"))
+rug_data    <- fread(file.path(output_dir, "pdp_rug_data.csv"))
+
+# Separate into climate and phenology subsets, ordered by descending importance; retain top 4 each
+top_clim  <- top_vars %>% filter(type == "clim")  %>% arrange(desc(mean_imp)) %>% slice_head(n = 4)
+top_pheno <- top_vars %>% filter(type == "pheno") %>% arrange(desc(mean_imp)) %>% slice_head(n = 4)
+```
+
+---
+
+## Define the human-readable axis label lookup for each of the 10 selected variables, including appropriate units.
+
+```{r}
+var_labels <- c(
+  "BIO_10 Mean Temp Warmest Quarter"    = "Mean Temp. Warmest Quarter (°C)",
+  "BIO_01 Annual Mean Temp"             = "Annual Mean Temp. (°C)",
+  "BIO_05 Max Temp Warmest Month"       = "Max Temp. Warmest Month (°C)",
+  "BIO_08 Mean Temp Wettest Quarter"    = "Mean Temp. Wettest Quarter (°C)",
+  "BIO_11 Mean Temp Coldest Quarter"    = "Mean Temp. Coldest Quarter (°C)",
+  "EVI2 Growing Season Area 1 Mean"     = "Growing Season Area (EVI2)",
+  "EVI2 Onset Greenness Maximum 1 Mean" = "Onset Greenness Maximum (EVI2)",
+  "Date Mid Greenup Phase 1 Mean"       = "Mid Greenup Date (day of year)",
+  "Growing Season Length 1 Mean"        = "Growing Season Length (days)",
+  "Rate Greenness Increase 1 Mean"      = "Rate of Greenness Increase (EVI2/day)"
+)
+```
+
+---
+
+## Define the panel plot function. Climate panels have a blue border; phenology panels have a green border. The y-axis scale is shown on every panel; the y-axis title is shown only on the leftmost panel of each row.
+
+```{r}
+make_pdp_plot <- function(var_name, df_pdp, df_rug, row_type, show_y_title = TRUE) {
+
+  var_data     <- df_pdp %>% filter(variable == var_name)
+  rug_vals     <- data.frame(x = df_rug[[var_name]])
+  display_name <- var_labels[var_name]
+
+  # Row-type styling: blue for climate, green for phenology
+  line_col   <- if (row_type == "clim") "steelblue4" else "#2e7d32"
+  border_col <- if (row_type == "clim") "steelblue3" else "#4caf50"
+
+  ggplot(var_data, aes(x = x_val, y = yhat)) +
+
+    geom_line(colour = line_col, linewidth = 0.9) +
+
+    # Rug marks show the distribution of observed predictor values
+    geom_rug(data = rug_vals, aes(x = x), inherit.aes = FALSE,
+             colour = "grey40", alpha = 0.15, linewidth = 0.3, length = unit(0.03, "npc")) +
+
+    coord_cartesian(ylim = c(0.550, 0.700)) +
+    scale_x_continuous(expand = c(0.02, 0), n.breaks = 8) +
+
+    labs(
+      x = str_wrap(display_name, width = 25),
+      y = if (show_y_title) "Partial dependence\n(propEcM)" else NULL
+    ) +
+
+    theme_classic(base_size = 11) +
+    theme(
+      panel.border  = element_rect(colour = border_col, fill = NA, linewidth = 1.1),
+      axis.title.x  = element_text(size = 9.5, lineheight = 1.2),
+      axis.title.y  = element_text(size = 10),
+      axis.text.x   = element_text(size = 9),
+      axis.text.y   = element_text(size = 9),
+      axis.ticks.y  = element_line(),
+      plot.margin   = margin(4, 6, 4, 4)
+    )
+}
+```
+
+---
+
+## Apply the panel plot function to build the climate and phenology panel lists, then combine each list into a single row using patchwork.
+
+```{r}
+# Build panel lists — y-axis title shown only on the leftmost panel of each row
+clim_plots <- lapply(seq_along(top_clim$variable), function(j) {
+  make_pdp_plot(top_clim$variable[j], pdp_results, rug_data,
+                row_type = "clim", show_y_title = (j == 1))
+})
+
+pheno_plots <- lapply(seq_along(top_pheno$variable), function(j) {
+  make_pdp_plot(top_pheno$variable[j], pdp_results, rug_data,
+                row_type = "pheno", show_y_title = (j == 1))
+})
+
+# Assemble each list into a single row
+clim_row  <- wrap_plots(clim_plots,  nrow = 1)
+pheno_row <- wrap_plots(pheno_plots, nrow = 1)
+```
+
+---
+
+## Stack the two rows with a dotted divider line between them and annotate with panel tags.
+
+```{r}
+# Dotted horizontal divider drawn as a grid line in a zero-height spacer
+row_divider <- wrap_elements(
+  linesGrob(
+    x  = unit(c(0, 1), "npc"),
+    y  = unit(c(0.5, 0.5), "npc"),
+    gp = gpar(lty = 3, col = "grey50", lwd = 1.5)
+  )
+)
+
+# Tags skip the divider by supplying an empty string for its position
+main_plot <- (clim_row / row_divider / pheno_row) +
+  plot_layout(heights = c(1, 0.03, 1)) +
+  plot_annotation(tag_levels = list(c("A","B","C","D","","E","F","G","H"))
+  ) &
+  theme(
+    plot.tag      = element_text(size = 9,    face = "bold"),
+    plot.title    = element_text(size = 14,   face = "bold"),
+    plot.subtitle = element_text(size = 10.5, colour = "grey40")
+  )
+```
+
+---
+
+## Display the final assembled figure.
+
+```{r fig.width=14, fig.height=7}
+final_plot <- main_plot
+
+final_plot
+```
+
+---
+
+## Export the assembled figure as a PNG.
+
+```{r}
+ggsave(
+  filename = file.path(output_dir, "CombinedModel_PartialDependencePlots.png"),
+  plot     = final_plot,
+  width    = 14,
+  height   = 7,
+  dpi = 500
+)
+```
+
+---
+
+## Compute PDP effect size (max − min partial dependence) per variable, join with importance scores, and export as a summary table.
+
+```{r}
+effect_size <- pdp_results[, .(
+  pdp_range = max(yhat) - min(yhat)
+), by = variable]
+
+effect_table <- merge(
+  effect_size,
+  as.data.table(top_vars)[, .(variable, type, mean_imp)],
+  by = "variable"
+)[order(-pdp_range)]
+
+effect_table[, label := var_labels[variable]]
+effect_table[, type  := ifelse(type == "clim", "Climate", "Phenology")]
+
+knitr::kable(
+  effect_table[, .(
+    Variable   = label,
+    Type       = type,
+    Importance = round(mean_imp,  4),
+    PDP_Range  = round(pdp_range, 4)
+  )],
+  caption = "PDP effect size (max − min partial dependence) and mean permutation importance per variable"
+)
+
+fwrite(
+  effect_table[, .(variable, label, type, mean_imp, pdp_range)],
+  file.path(output_dir, "CombinedModel_PDPEffectSizes.csv")
+)
+```
+
+---
+
+```{r}
+citation("doParallel")
+citation("foreach")
+```
+

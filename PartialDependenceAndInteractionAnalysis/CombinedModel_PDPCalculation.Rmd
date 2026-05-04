@@ -1,0 +1,257 @@
+---
+title: "Combined Model — Partial Dependence and H-Statistic Calculation"
+output: html_document
+---
+
+This notebook computes partial dependence profiles (PDPs) and Friedman H-statistics for the optimum combined random forest model. The optimum variable set is the top 23 variables by mean permutation importance from the *Combined Model — Variable Importance Summary* notebook, matching the variable count identified as optimal by the *Combined Model — Backward Elimination Variable Importance* notebook.
+
+A single run is selected at random and retrained once with `write.forest = TRUE` using the 23 optimum predictors. PDPs are computed for the top 4 climate and top 4 phenology variables across all training data at 50 grid points per variable. H-statistics are computed on a 5,000-row random subsample; an overall H-statistic is produced for each of the 23 variables and pairwise H-statistics are produced for every variable pair. All outputs are exported as CSVs for use in the downstream plotting notebooks.
+
+---
+
+## Load the packages required for modelling, data handling, PDP, and H-statistic computation.
+
+```{r}
+library(data.table)
+library(ranger)
+library(pdp)
+library(iml)
+```
+
+---
+
+## Define file paths for input data and output directories.
+
+```{r}
+data_dir   <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing'
+model_dir  <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+imp_dir    <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/ImportanceRanks'
+output_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/PartialDependencePlots'
+```
+
+---
+
+## Load the modelling dataset and variable importance summary. Extract the top 23 optimum predictors and prepare the training dataframe.
+
+```{r}
+model_df    <- fread(file.path(data_dir, 'Modelling_Data.csv'))
+imp_summary <- fread(file.path(imp_dir,  'CombinedModelImportanceSummary.csv'))
+
+top23_vars <- imp_summary[rank <= 23][order(rank), variable]
+train_df   <- as.data.frame(model_df[, ..top23_vars])
+
+cat(sprintf("Optimum predictor set (%d variables):\n", length(top23_vars)))
+print(top23_vars)
+```
+
+---
+
+## Identify the top 4 climate and top 4 phenology variables within the optimum set for PDP computation. Climate variables match `BIO_*`; all others are phenology.
+
+```{r}
+opt_imp <- imp_summary[rank <= 23][, type := ifelse(grepl("^BIO_", variable), "clim", "pheno")]
+
+top_clim  <- opt_imp[type == "clim"][order(mean_importance, decreasing = TRUE)][1:4]
+top_pheno <- opt_imp[type == "pheno"][order(mean_importance, decreasing = TRUE)][1:4]
+top_vars  <- rbind(top_clim, top_pheno)
+
+# Rename to mean_imp for compatibility with the PDP plotting notebook
+setnames(top_vars, "mean_importance", "mean_imp")
+
+print(top_clim[, .(variable, mean_importance)])
+print(top_pheno[, .(variable, mean_importance)])
+```
+
+---
+
+## Export the selected variable metadata and raw training values for the 8 selected variables. The training values are used for rug plots in the PDP plotting notebook.
+
+```{r}
+fwrite(top_vars, file.path(output_dir, "top_vars.csv"))
+
+rug_data <- train_df[, top_vars$variable, drop = FALSE]
+fwrite(rug_data, file.path(output_dir, "pdp_rug_data.csv"))
+```
+
+---
+
+## Select a run at random from the combined model run statistics.
+
+```{r}
+run_stats <- fread(file.path(model_dir, 'AllCombinedModelStats.csv'))
+best_run  <- run_stats[sample(.N, 1)]
+
+message("Selected run: Run ", best_run$run,
+        " (seed ", best_run$seed,
+        ", R² = ", round(best_run$r_squared, 4), ")")
+```
+
+---
+
+## Retrain the selected run on the optimum 23-variable predictor set with `write.forest = TRUE`. This single model is used for both PDP and H-statistic computation.
+
+```{r}
+rf_model <- ranger(
+  x            = model_df[, ..top23_vars],
+  y            = model_df$propEcM,
+  num.trees    = 500,
+  num.threads  = 7,
+  write.forest = TRUE,
+  seed         = best_run$seed
+)
+
+message("Model R²: ", round(rf_model$r.squared, 4))
+```
+
+---
+
+## Compute partial dependence profiles for each of the 8 selected variables across 50 grid points.
+
+```{r}
+pdp_list <- vector("list", nrow(top_vars))
+
+for (i in seq_len(nrow(top_vars))) {
+  v  <- top_vars$variable[i]
+  pd <- partial(rf_model, pred.var = v, train = train_df, grid.resolution = 50)
+  names(pd)[names(pd) == v] <- "x_val"
+  pd$variable <- v
+  pdp_list[[i]] <- as.data.table(pd)
+  message("Computed PDP for: ", v)
+}
+
+pdp_results <- rbindlist(pdp_list)[top_vars[, .(variable, type)], on = "variable"]
+```
+
+---
+
+## Export the partial dependence results as a CSV.
+
+```{r}
+fwrite(pdp_results, file.path(output_dir, "pdp_results.csv"))
+```
+
+---
+
+## Rename training data columns to valid R names and retrain the model for H-statistic computation. iml converts column names with spaces to dots internally, causing a mismatch with the original ranger model. Retraining on a clean-named copy of `train_df` ensures ranger, iml, and `sample_df` all use identical column names. A name mapping is created to convert dotted names back to original variable names for merging with the importance summary.
+
+```{r}
+# Create clean column names (spaces → dots) and a reverse mapping
+train_df_clean           <- train_df
+colnames(train_df_clean) <- make.names(colnames(train_df_clean))
+name_map                 <- setNames(top23_vars, make.names(top23_vars))
+
+rf_model <- ranger(
+  x            = train_df_clean,
+  y            = model_df$propEcM,
+  num.trees    = 500,
+  num.threads  = 7,
+  write.forest = TRUE,
+  seed         = best_run$seed
+)
+
+message("Model R² (H-stat run): ", round(rf_model$r.squared, 4))
+```
+
+---
+
+## Build an iml Predictor object on a 5,000-row random subsample of the clean training data. Column names are already consistent so no name manipulation is required in the predict function. A sequential future plan is set to prevent iml from attempting to export the large ranger model to parallel workers.
+
+```{r}
+future::plan("sequential")
+options(future.globals.maxSize = Inf)
+
+set.seed(best_run$seed)
+sample_idx <- sample(nrow(train_df_clean), 5000)
+sample_df  <- train_df_clean[sample_idx, ]
+sample_y   <- model_df$propEcM[sample_idx]
+
+pred_fun <- function(model, newdata) {
+  predict(model, data = newdata)$predictions
+}
+
+predictor <- Predictor$new(
+  model       = rf_model,
+  data        = sample_df,
+  y           = sample_y,
+  predict.fun = pred_fun
+)
+```
+
+---
+
+## Compute the overall H-statistic for each of the 23 variables — the proportion of each variable's total effect attributable to interactions with all other variables in the optimum set.
+
+```{r}
+message("Computing overall H-statistics — this may take several minutes...")
+
+h_overall_obj <- Interaction$new(predictor, grid.size = 20)
+h_overall     <- as.data.table(h_overall_obj$results)
+setnames(h_overall, c(".feature", ".interaction"), c("variable", "H_overall"))
+
+# Remap dotted names back to original spaced names for merging with imp_summary
+h_overall[, variable := name_map[variable]]
+
+h_overall <- merge(
+  h_overall,
+  imp_summary[, .(variable, rank, mean_importance)],
+  by = "variable"
+)[order(-H_overall)]
+
+print(h_overall)
+```
+
+---
+
+## Export the overall H-statistic results before running the pairwise computation.
+
+```{r}
+fwrite(h_overall, file.path(output_dir, "h_overall.csv"))
+```
+
+---
+
+## Compute pairwise H-statistics for each phenology variable in the optimum set against all other 23 variables. Only phenology variables (non-`BIO_*`) are used as focal variables, reducing computation to the interactions most relevant to assessing phenology's role.
+
+```{r}
+pheno_vars_clean <- make.names(top23_vars[!grepl("^BIO_", top23_vars)])
+top23_vars_clean <- make.names(top23_vars)
+h_pair_list      <- vector("list", length(pheno_vars_clean))
+
+for (i in seq_along(pheno_vars_clean)) {
+  v      <- pheno_vars_clean[i]
+  message("Computing pairwise H for: ", v, " (", i, " of ", length(pheno_vars_clean), ")")
+  h_pair <- Interaction$new(predictor, feature = v, grid.size = 20)
+  df     <- as.data.table(h_pair$results)
+  # iml returns .feature as "other_var:focal_var" — extract just the other variable
+  df[, var2 := sub(paste0(":", v, "$"), "", .feature)]
+  df[, var1 := v]
+  df[, H    := .interaction]
+  h_pair_list[[i]] <- df[, .(var1, var2, H)]
+}
+
+h_pairwise <- rbindlist(h_pair_list)
+```
+
+---
+
+## Strip the iml pairwise feature name format and remove self-pairs. iml returns var2 as "other_var:focal_var" — the focal variable suffix is removed. Variable names are retained in dotted format.
+
+```{r}
+# Remove ":focal_var" suffix iml appends to pairwise feature names
+
+h_pairwise[, var2 := sub(":.*$", "", var2)]
+h_pairwise <- h_pairwise[var1 != var2][order(-H)]
+```
+
+---
+
+## Export the pairwise H-statistic results as a CSV.
+
+```{r}
+fwrite(h_pairwise, file.path(output_dir, "h_pairwise.csv"))
+```
+
+```{r}
+citation("pdp")
+citation("iml")
+```

@@ -1,0 +1,176 @@
+---
+title: "Combined Model — H-Statistic Plots"
+output: html_document
+---
+
+This notebook reads the H-statistic outputs produced by the *Combined Model — Partial Dependence and H-Statistic Calculation* notebook and produces two figures: a bar chart of the overall H-statistic per variable and a heatmap of pairwise interaction strengths across the optimum 23-variable predictor set. Both figures are exported as PNGs.
+
+---
+
+## Load the packages required for data handling and plotting.
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(ggtext)
+```
+
+---
+
+## Define file paths for the H-statistic outputs and importance summary.
+
+```{r}
+imp_dir    <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/ImportanceRanks'
+output_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/PartialDependencePlots'
+```
+
+---
+
+## Load the H-statistic results and variable importance summary.
+
+```{r}
+h_overall   <- fread(file.path(output_dir, "h_overall.csv"))
+imp_summary <- fread(file.path(imp_dir,    "CombinedModelImportanceSummary.csv"))
+```
+
+---
+
+## Build helpers to produce clean axis labels matching the PDP plot naming conventions. Strips the `BIO_XX` prefix from climate variable names and the trailing `1 Mean` from phenology variable names. Labels are wrapped in coloured HTML spans — blue for climate, green for phenology — for rendering via `ggtext`.
+
+```{r}
+clean_var_name <- function(v) {
+  v <- gsub("^BIO_\\d+\\s+", "", v)    # strip BIO_XX prefix from climate vars
+  v <- gsub("\\s+1\\s+Mean$", "", v)   # strip trailing "1 Mean" from phenology vars
+  v
+}
+
+make_html_label <- function(v) {
+  colour <- ifelse(grepl("^BIO_", v), "steelblue", "#4caf50")
+  rnk    <- imp_summary[variable == v, rank]
+  paste0("<span style='color:", colour, "; font-weight:bold'>(", rnk, ") ", clean_var_name(v), "</span>")
+}
+```
+
+---
+
+## Plot the overall H-statistic for each variable as a bar chart. Variables are ordered by importance rank, with the most important variable at the top. A dashed reference line at H = 0.10 marks the threshold for meaningful interaction effects.
+
+```{r fig.width=10, fig.height=8}
+# Order by H_overall ascending so coord_flip places the highest H at the bottom
+h_overall_plot <- h_overall[order(-H_overall)]
+h_overall_plot[, label_html := factor(
+  sapply(variable, make_html_label),
+  levels = sapply(variable, make_html_label)
+)]
+
+overall_plot <- ggplot(h_overall_plot, aes(x = label_html, y = H_overall,
+                                           fill = ifelse(grepl("^BIO_", variable), "Climate", "Phenology"))) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = sprintf("%.3f", H_overall)),
+            hjust = -0.15, size = 3.5, colour = "grey20") +
+  scale_fill_manual(values = c("Climate" = "steelblue", "Phenology" = "#4caf50"),
+                    name = "Variable type") +
+  guides(fill = guide_legend(override.aes = list(size = 4))) +
+  scale_y_continuous(limits = c(0, NA), expand = expansion(mult = c(0, 0.12))) +
+  coord_flip() +
+  labs(x = " << ============ Increasing importance ============ ", y = "Overall H-statistic") +
+  theme_minimal() +
+  theme(
+    axis.title.y      = element_text(size = 11),
+    axis.title.x      = element_text(size = 13),
+    axis.text.x       = element_text(size = 11),
+    axis.text.y       = element_markdown(size = 12),
+    legend.title      = element_text(size = 13),
+    legend.text       = element_text(size = 12),
+    axis.line         = element_line(colour = "black", linewidth = 0.5),
+    axis.ticks        = element_line(colour = "black"),
+    axis.ticks.length = unit(3, "pt")
+  )
+
+print(overall_plot)
+```
+
+---
+
+## Export the overall H-statistic bar chart as a PNG.
+
+```{r}
+ggsave(file.path(output_dir, "h_overall_plot.png"),
+       plot   = overall_plot,
+       width  = 10,
+       height = 8,
+       dpi    = 300)
+```
+
+---
+
+## Build the pairwise H-statistic heatmap. Phenology variables form the y-axis and all 23 optimum variables form the x-axis, producing a rectangular grid. Both axes are ordered by importance rank with most important at the top/left. Axis titles include arrows to indicate the direction of decreasing importance.
+
+```{r fig.width=13, fig.height=4}
+# Re-read from CSV to ensure no corruption from earlier factor conversion attempts
+hp      <- as.data.frame(fread(file.path(output_dir, "h_pairwise.csv")))
+hp$var1 <- as.character(hp$var1)
+hp$var2 <- as.character(hp$var2)
+
+# For phenology-phenology pairs the computation runs in both directions,
+# producing two slightly different values due to numerical approximation.
+# Resolve by averaging: create a canonical pair key (sorted alphabetically),
+# then replace each pair's H with the mean of both directions.
+hp$pair_key <- paste(pmin(hp$var1, hp$var2), pmax(hp$var1, hp$var2), sep = "|||")
+hp <- merge(
+  hp,
+  aggregate(H ~ pair_key, data = hp, FUN = mean),
+  by = "pair_key", suffixes = c("_orig", "")
+)
+hp$H_orig <- NULL
+hp$pair_key <- NULL
+# Drop duplicate rows so each (var1, var2) direction appears only once
+hp <- hp[!duplicated(paste(hp$var1, hp$var2)), ]
+
+x_order_clean <- make.names(imp_summary[rank <= 23][order(rank), variable])
+y_order_clean <- make.names(imp_summary[rank <= 23][!grepl("^BIO_", variable)][order(rank), variable])
+
+# Only keep axis limits for values present in the data
+x_limits <- x_order_clean[x_order_clean %in% hp$var2]
+y_limits <- y_order_clean[y_order_clean %in% hp$var1]
+
+# Build readable labels for values present
+x_orig   <- imp_summary[rank <= 23][order(rank), variable]
+y_orig   <- imp_summary[rank <= 23][!grepl("^BIO_", variable)][order(rank), variable]
+x_labels <- setNames(sapply(x_orig, make_html_label), make.names(x_orig))
+y_labels <- setNames(sapply(y_orig, make_html_label), make.names(y_orig))
+
+heatmap_plot <- ggplot(hp, aes(x = var2, y = var1, fill = H)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  geom_text(data = hp[hp$H >= 0.10, ],
+            aes(label = sprintf("%.2f", H)),
+            colour = "white", size = 2.8, fontface = "bold") +
+  scale_fill_distiller(palette = "YlOrRd", direction = 1,
+                       name = "Pairwise H",
+                       limits = c(0, max(hp$H))) +
+  scale_x_discrete(limits = x_limits, labels = x_labels) +
+  scale_y_discrete(limits = y_limits, labels = y_labels) +
+  theme_minimal() +
+  theme(
+    axis.text.x  = element_markdown(size = 11, angle = 45, hjust = 1, vjust = 1),
+    axis.text.y  = element_markdown(size = 11),
+    legend.title = element_text(size = 12),
+    legend.text  = element_text(size = 11),
+    panel.grid   = element_blank()
+  )
+
+print(heatmap_plot)
+```
+
+---
+
+## Export the pairwise H-statistic heatmap as a PNG.
+
+```{r}
+ggsave(file.path(output_dir, "h_pairwise_heatmap.png"),
+       plot   = heatmap_plot,
+       width  = 13,
+       height = 4,
+       dpi    = 300)
+```
+
