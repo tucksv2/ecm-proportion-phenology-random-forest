@@ -1,0 +1,108 @@
+---
+title: "GFBI Cell EcM Proportion Map"
+output: html_document
+---
+
+This notebook maps the geographic locations of all GFBI grid cells used in the analysis, coloured by the proportion of ectomycorrhizal (EcM) associated trees (`propEcM`). Cell coordinates are sourced from the GFBI VIIRS export in WGS84 lon/lat. `propEcM` is joined from the simple mycorrhizal dataset by cell ID.
+
+The plasma colour scale runs from high EcM proportion (light yellow) to low (dark purple), reversed so that high values are visually prominent. The map provides a spatial reference for the geographic distribution of EcM dominance across the North American GFBI data. The plot is exported as a PNG.
+
+---
+
+## Load the packages required for spatial data handling and plotting.
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(ggspatial)
+```
+
+---
+
+## Define file paths for input data and plot output directories.
+
+```{r}
+data_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing'
+gee_dir  <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing/Google Earth Engine'
+save_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/SupplementaryPlots'
+```
+
+---
+
+## Load cell coordinates and join propEcM from the simple mycorrhizal dataset by cell ID.
+
+```{r}
+coords     <- fread(file.path(gee_dir, "GFBI_VIIRS_Cells_Data_1.csv"))
+simple_myc <- fread(file.path(data_dir, "Simple_Myc_Data.csv"))
+
+# Join propEcM onto coordinates; retain only cells present in the simple mycorrhizal dataset
+cells <- coords[simple_myc[, .(cell, propEcM)], on = "cell", nomatch = 0]
+```
+
+---
+
+## Build the North America basemap using Natural Earth country boundaries.
+
+```{r}
+north_america <- ne_countries(
+  continent   = "North America",
+  scale       = "medium",
+  returnclass = "sf"
+)
+```
+
+---
+
+## Plot cell locations coloured by propEcM over the basemap. The plasma scale is reversed so that high EcM proportion appears in light yellow.
+
+```{r fig.width=10, fig.height=8}
+p_ecm <- ggplot() +
+  geom_sf(data = north_america, fill = "grey90", colour = "grey60", linewidth = 0.3) +
+  geom_point(
+    data = cells,
+    aes(x = lon, y = lat, colour = propEcM),
+    size = 0.1, alpha = 0.8
+  ) +
+  coord_sf(
+    xlim   = c(-180, -40),
+    ylim   = c(7, 80),
+    expand = FALSE,
+    datum  = sf::st_crs(4326)
+  ) +
+  scale_y_continuous(breaks = seq(10, 80, by = 10)) +
+  scale_colour_viridis_c(
+    name      = "propEcM",
+    limits    = c(0, 1),
+    option    = "plasma",
+    direction = -1
+  ) +
+  labs(
+    x     = "Longitude",
+    y     = "Latitude"
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.25) +
+  annotation_north_arrow(
+    location = "br", which_north = "true",
+    style    = north_arrow_fancy_orienteering()
+  ) +
+  theme_bw(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+p_ecm
+```
+
+---
+
+## Export the EcM proportion map as a PNG.
+
+```{r}
+ggsave(
+  file.path(save_dir, "gfbi_cell_ecm_proportion.png"),
+  plot   = p_ecm,
+  width  = 10,
+  height = 8
+)
+```

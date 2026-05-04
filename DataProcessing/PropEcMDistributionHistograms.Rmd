@@ -1,0 +1,175 @@
+---
+title: "EcM Proportion – Distribution Histograms"
+output: html_document
+---
+
+This notebook plots the distribution of `propEcM` across all GFBI cells using data from the simple mycorrhizal dataset. The first histogram shows the overall distribution of EcM proportion, illustrating the bimodal pattern with peaks near 0 (AM-dominated cells) and 1 (EcM-dominated cells). The proportion of cells falling in the extreme bins (0–0.05 and 0.95–1.00) is annotated directly on the plot.
+
+The second plot is a ridge plot showing the full distribution of `propEcM` within each 10° latitude band, with ridges coloured by `propEcM` value using the plasma scale. Latitude bands are ordered with the highest latitude at the top, so the shift from AM- to EcM-dominated cells can be read upward. Cell coordinates are joined from the GFBI VIIRS export to assign latitude band membership. Both plots are exported as PNGs.
+
+---
+
+## Load the packages required for data handling and plotting.
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(ggridges)
+```
+
+---
+
+## Define file paths for input data and plot output directories.
+
+```{r}
+data_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing'
+gee_dir  <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing/Google Earth Engine'
+save_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/SupplementaryPlots'
+```
+
+---
+
+## Load the simple mycorrhizal dataset.
+
+```{r}
+simple_myc <- fread(file.path(data_dir, "Simple_Myc_Data.csv"))
+```
+
+---
+
+## Compute the percentage of cells in the lowest and highest propEcM bins for annotation on the histogram.
+
+```{r}
+n_total   <- nrow(simple_myc)
+first_pct <- nrow(simple_myc[propEcM <  0.05]) / n_total * 100  # 0.00–0.05 bin
+last_pct  <- nrow(simple_myc[propEcM >= 0.95]) / n_total * 100  # 0.95–1.00 bin
+
+cat(sprintf("First bin (0.00–0.05): %.1f%%\n", first_pct))
+cat(sprintf("Last bin  (0.95–1.00): %.1f%%\n", last_pct))
+```
+
+---
+
+## Plot the overall distribution of propEcM across all GFBI cells. Bars are coloured by propEcM value using the plasma scale; the percentage of cells in the extreme bins is annotated directly on the plot.
+
+```{r fig.width=8, fig.height=5}
+p_hist <- ggplot(simple_myc, aes(x = propEcM,
+                                  y = after_stat(count / sum(count) * 100),
+                                  fill = after_stat(x))) +
+  geom_histogram(
+    breaks    = seq(0, 1, by = 0.05),
+    colour    = "white",
+    linewidth = 0.3
+  ) +
+  scale_fill_viridis_c(
+    name      = "propEcM",
+    limits    = c(0, 1),
+    option    = "plasma",
+    direction = -1
+  ) +
+  # Annotate the percentage of cells in the first and last bins
+  annotate("text", x = 0.025, y = first_pct + 1,
+           label = sprintf("%.1f%%", first_pct), size = 3.5, colour = "grey30") +
+  annotate("text", x = 0.975, y = last_pct + 1,
+           label = sprintf("%.1f%%", last_pct),  size = 3.5, colour = "grey30") +
+  scale_x_continuous(limits = c(-0.05, 1.05), breaks = seq(0, 1, by = 0.1)) +
+  labs(
+    x     = "Proportion of EcM Associated Stems (propEcM)",
+    y     = "% of GFBI Forest Cells"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor  = element_blank(),
+    axis.line         = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks        = element_line(colour = "black"),
+    axis.ticks.length = unit(3, "pt")
+  )
+
+p_hist
+```
+
+---
+
+## Export the overall propEcM histogram as a PNG.
+
+```{r}
+ggsave(
+  file.path(save_dir, "propEcM_distribution_histogram.png"),
+  plot   = p_hist,
+  width  = 8,
+  height = 5,
+  dpi    = 300
+)
+```
+
+---
+
+## Join cell coordinates from the GFBI VIIRS export and assign each cell to a 10° latitude band.
+
+```{r}
+coords <- fread(file.path(gee_dir, "GFBI_VIIRS_Cells_Data_1.csv"),
+                select = c("cell", "lat"))
+
+# Join latitude onto simple mycorrhizal data; retain only matched cells
+simple_myc_lat <- coords[simple_myc, on = "cell", nomatch = 0]
+
+# Assign ordered latitude band factor; highest latitude at the top of the ridge plot
+simple_myc_lat[, lat_band := cut(
+  lat,
+  breaks = c(-Inf, 20, 30, 40, 50, 60, Inf),
+  labels = c("< 20°N", "20–30°N", "30–40°N", "40–50°N", "50–60°N", "> 60°N"),
+  right  = FALSE
+)]
+```
+
+---
+
+## Plot the distribution of propEcM within each latitude band as a ridge plot. Ridges are coloured by propEcM value using the plasma scale, matching the overall histogram.
+
+```{r fig.width=8, fig.height=8}
+p_lat <- ggplot(simple_myc_lat, aes(x = propEcM, y = lat_band, fill = after_stat(x))) +
+  geom_density_ridges_gradient(
+    colour         = "black",
+    linewidth      = 0.3
+  ) +
+  scale_fill_viridis_c(
+    name      = "propEcM",
+    limits    = c(0, 1),
+    option    = "plasma",
+    direction = -1
+  ) +
+  scale_x_continuous(breaks = seq(0, 1, by = 0.2), limits = c(0, 1)) +
+  scale_y_discrete(expand = expansion(add = c(0.8, 1.9))) +
+  labs(
+    x     = "Proportion of EcM Associated Stems (propEcM)",
+    y     = "Latitude band"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor  = element_blank(),
+    axis.line         = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks        = element_line(colour = "black"),
+    axis.ticks.length = unit(3, "pt")
+  )
+
+p_lat
+```
+
+---
+
+## Export the propEcM ridge plot as a PNG.
+
+```{r}
+ggsave(
+  file.path(save_dir, "propEcM_latitude_ridgeplot.png"),
+  plot   = p_lat,
+  width  = 8,
+  height = 8,
+  dpi    = 300
+)
+```
+
+```{r}
+citation("ggridges")
+```
+

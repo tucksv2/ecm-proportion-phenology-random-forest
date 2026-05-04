@@ -1,0 +1,112 @@
+---
+title: "GFBI Cell Location Map"
+output: html_document
+---
+
+This notebook maps the geographic locations of all GFBI grid cells used in the analysis, plotted over a North America basemap. Cell coordinates are sourced from the GFBI VIIRS export in WGS84 lon/lat. The dataset is restricted to cells present in the simple mycorrhizal dataset by joining on cell ID.
+
+The resulting map provides a visual reference for the geographic coverage and spatial distribution of the GFBI data across North America. The plot is exported as a PNG.
+
+---
+
+## Load the packages required for spatial data handling and plotting.
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(ggspatial)
+```
+
+---
+
+## Define file paths for input data and plot output directories.
+
+```{r}
+data_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing'
+gee_dir  <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing/Google Earth Engine'
+save_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/SupplementaryPlots'
+```
+
+---
+
+## Load cell coordinates and restrict to cells present in the simple mycorrhizal dataset by joining on cell ID.
+
+```{r}
+coords     <- fread(file.path(gee_dir, "GFBI_VIIRS_Cells_Data_1.csv"))
+simple_myc <- fread(file.path(data_dir, "Simple_Myc_Data.csv"))
+
+# Retain only cells present in the simple mycorrhizal dataset
+cells <- coords[simple_myc[, .(cell)], on = "cell", nomatch = 0]
+```
+
+---
+
+## Build the North America basemap using Natural Earth country boundaries.
+
+```{r}
+north_america <- ne_countries(
+  continent   = "North America",
+  scale       = "medium",
+  returnclass = "sf"
+)
+```
+
+---
+
+## Plot cell locations over the basemap. Each point represents one GFBI grid cell.
+
+```{r fig.width=11, fig.height=7}
+p_locations <- ggplot() +
+  geom_sf(data = north_america, fill = "grey90", colour = "grey60", linewidth = 0.3) +
+  geom_point(
+    data   = cells,
+    aes(x = lon, y = lat),
+    colour = "steelblue", size = 0.1, alpha = 0.8
+  ) +
+  coord_sf(
+    xlim   = c(-180, -40),
+    ylim   = c(7, 80),
+    expand = FALSE,
+    datum  = sf::st_crs(4326)
+  ) +
+  scale_y_continuous(breaks = seq(10, 80, by = 10)) +
+  labs(
+    x     = "Longitude",
+    y     = "Latitude"
+  ) +
+  annotation_scale(location = "bl", width_hint = 0.25) +
+  annotation_north_arrow(
+    location = "br", which_north = "true",
+    style    = north_arrow_fancy_orienteering()
+  ) +
+  theme_bw(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+p_locations
+```
+
+---
+
+## Export the cell location map as a PNG.
+
+```{r}
+ggsave(
+  file.path(save_dir, "gfbi_cell_locations.png"),
+  plot   = p_locations,
+  width  = 11,
+  height = 7
+)
+```
+
+```{r}
+citation()
+citation("ggplot2")
+citation("sf")
+citation("rnaturalearth")
+citation("rnaturalearthdata")
+citation("ggspatial")
+```
+
