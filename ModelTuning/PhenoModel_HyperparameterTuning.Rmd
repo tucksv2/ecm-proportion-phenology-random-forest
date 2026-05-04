@@ -1,0 +1,178 @@
+---
+title: "Phenology Model - Hyperparameter Tuning"
+output: html_document
+---
+
+This notebook tunes three key hyperparameters of the phenology-only random forest model: `num.trees`, `mtry`, and `min.node.size`. The phenology model is the focal model for this study and is therefore the priority for hyperparameter evaluation. Each parameter is tuned sequentially: `num.trees` first to establish a stable ensemble size, then `mtry` (the most influential parameter) using the chosen tree count, and finally `min.node.size`. A single fixed seed is used throughout to isolate the effect of each parameter. OOB R² is used as the performance metric throughout, as it provides an honest estimate of generalisation without requiring a separate validation set.
+
+---
+
+## Load required packages.
+
+```{r}
+library(data.table)
+library(ranger)
+library(ggplot2)
+```
+
+---
+
+## Read in the modelling dataset and define the phenology-only predictor set.
+
+```{r}
+model_df <- fread('/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing/Modelling_Data.csv')
+
+set.seed(42)
+model_df <- model_df[sample(.N, 50000)]
+
+predictor_vars <- setdiff(names(model_df), c("cell", "propEcM"))
+predictor_vars <- predictor_vars[!grepl("^BIO_", predictor_vars)]
+
+cat("Number of phenology predictors:", length(predictor_vars), "\n")
+cat("Default mtry (floor(p/3)):", floor(length(predictor_vars) / 3), "\n")
+```
+
+---
+
+## Step 1 — Tune `num.trees`.
+
+OOB R² is recorded across a range of tree counts. The plateau indicates the minimum ensemble size needed for stable predictions. A fixed seed is used so that any change in OOB R² reflects tree count alone.
+
+```{r}
+tree_vals <- c(50, 100, 150, 200, 300, 400, 500, 750, 1000)
+
+tree_results <- rbindlist(lapply(tree_vals, function(nt) {
+  m <- ranger(
+    x             = model_df[, ..predictor_vars],
+    y             = model_df$propEcM,
+    num.trees     = nt,
+    num.threads   = 7,
+    seed          = 42
+  )
+  data.frame(num_trees = nt, r_squared = m$r.squared)
+}))
+
+print(tree_results)
+```
+
+```{r}
+ggplot(tree_results, aes(x = num_trees, y = r_squared)) +
+  geom_line(colour = "#2c7bb6", linewidth = 0.8) +
+  geom_point(colour = "#2c7bb6", size = 2.5) +
+  geom_vline(xintercept = 500, linetype = "dashed", colour = "grey50") +
+  annotate("text", x = 510, y = min(tree_results$r_squared),
+           label = "Default", hjust = 0, colour = "grey50", size = 3.5) +
+  labs(
+    x     = "Number of Trees",
+    y     = expression("OOB R"^2),
+    title = "Phenology Model: OOB R² vs Number of Trees"
+  ) +
+  theme_classic()
+
+ggsave(
+  filename = file.path(
+    '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/TuningParams',
+    "PhenoModel_Trees_Tuning.png"
+  ),
+  width = 7, height = 5, dpi = 300
+)
+```
+
+---
+
+## Step 2 — Tune `mtry`.
+
+`mtry` controls the number of predictors randomly considered at each split and is the most influential hyperparameter in random forest models. With 38 phenology predictors, the default is `floor(38/3) = 12`. A range spanning well below and above this default is tested. `num.trees` is fixed at 500 throughout.
+
+```{r}
+mtry_vals <- c(2, 4, 6, 8, 10, 12, 16, 20, 25, 30, 38)
+
+mtry_results <- rbindlist(lapply(mtry_vals, function(mt) {
+  m <- ranger(
+    x             = model_df[, ..predictor_vars],
+    y             = model_df$propEcM,
+    num.trees     = 500,
+    mtry          = mt,
+    num.threads   = 7,
+    seed          = 42
+  )
+  data.frame(mtry = mt, r_squared = m$r.squared)
+}))
+
+print(mtry_results)
+```
+
+```{r}
+ggplot(mtry_results, aes(x = mtry, y = r_squared)) +
+  geom_line(colour = "#2c7bb6", linewidth = 0.8) +
+  geom_point(colour = "#2c7bb6", size = 2.5) +
+  geom_vline(xintercept = floor(length(predictor_vars) / 3),
+             linetype = "dashed", colour = "grey50") +
+  annotate("text", x = floor(length(predictor_vars) / 3) + 0.5,
+           y = min(mtry_results$r_squared),
+           label = "Default", hjust = 0, colour = "grey50", size = 3.5) +
+  labs(
+    x     = "mtry",
+    y     = expression("OOB R"^2),
+    title = "Phenology Model: OOB R² vs mtry"
+  ) +
+  theme_classic()
+
+ggsave(
+  filename = file.path(
+    '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/TuningParams',
+    "PhenoModel_Mtry_Tuning.png"
+  ),
+  width = 7, height = 5, dpi = 300
+)
+```
+
+---
+
+## Step 3 — Tune `min.node.size`.
+
+`min.node.size` sets the minimum number of observations required in a terminal node, controlling tree depth. Smaller values allow deeper, more flexible trees; larger values produce shallower, more regularised trees. The default for regression is 5. `num.trees` is fixed at 500 and `mtry` at the ranger default throughout.
+
+```{r}
+node_vals <- c(1, 2, 5, 10, 20, 30, 50, 75, 100)
+
+node_results <- rbindlist(lapply(node_vals, function(ns) {
+  m <- ranger(
+    x             = model_df[, ..predictor_vars],
+    y             = model_df$propEcM,
+    num.trees     = 500,
+    min.node.size = ns,
+    num.threads   = 7,
+    seed          = 42
+  )
+  data.frame(min_node_size = ns, r_squared = m$r.squared)
+}))
+
+print(node_results)
+```
+
+```{r}
+ggplot(node_results, aes(x = min_node_size, y = r_squared)) +
+  geom_line(colour = "#2c7bb6", linewidth = 0.8) +
+  geom_point(colour = "#2c7bb6", size = 2.5) +
+  geom_vline(xintercept = 5, linetype = "dashed", colour = "grey50") +
+  annotate("text", x = 5.5, y = min(node_results$r_squared),
+           label = "Default", hjust = 0, colour = "grey50", size = 3.5) +
+  labs(
+    x     = "Minimum Node Size",
+    y     = expression("OOB R"^2),
+    title = "Phenology Model: OOB R² vs Minimum Node Size"
+  ) +
+  theme_classic()
+
+ggsave(
+  filename = file.path(
+    '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/TuningParams',
+    "PhenoModel_NodeSize_Tuning.png"
+  ),
+  width = 7, height = 5, dpi = 300
+)
+```
+
+---
+
