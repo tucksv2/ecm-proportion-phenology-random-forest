@@ -1,0 +1,270 @@
+---
+title: "Phenology Contribution — Ecoregion Map"
+output: html_document
+---
+
+This notebook maps the per-cell contribution of phenology aggregated to EPA Level III ecoregions. Delta = |combined residual| − |climate residual| averaged across all 100 model runs and then averaged per ecoregion. A negative mean delta indicates phenology improved predictions on balance within that ecoregion; a positive mean delta indicates it added noise.
+
+---
+
+## Load packages.
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(Hmisc)
+library(ggspatial)
+```
+
+---
+
+## Define file paths.
+
+```{r}
+model_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+gee_dir   <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing/Google Earth Engine'
+save_dir  <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/PhenologyContributionMap'
+eco_dir   <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/PhenologyContributionMap/NA_CEC_Eco_Level3'
+```
+
+---
+
+## Load model predictions and cell coordinates.
+
+```{r}
+climate_preds  <- fread(file.path(model_dir, "AllClimateModelPredictions.csv"))
+combined_preds <- fread(file.path(model_dir, "AllCombinedModelPredictions.csv"))
+coords         <- fread(file.path(gee_dir,   "GFBI_VIIRS_Cells_Data_1.csv"))
+```
+
+---
+
+## Join predictions at the run level, compute per-run delta, and average to cell level.
+
+```{r}
+# Join on both cell and run so each row is one run's prediction for one cell
+runs <- climate_preds[combined_preds[, .(run, cell, predicted_combined = predicted)],
+                      on = .(run, cell), nomatch = 0]
+
+runs[, abs_resid_climate  := abs(observed - predicted)]
+runs[, abs_resid_combined := abs(observed - predicted_combined)]
+runs[, delta_run          := abs_resid_combined - abs_resid_climate]
+
+# Average per-run delta per cell
+cells <- runs[, .(
+  observed           = mean(observed),
+  predicted_climate  = mean(predicted),
+  predicted_combined = mean(predicted_combined),
+  delta              = mean(delta_run)
+), by = cell]
+```
+
+---
+
+## Join cell coordinates and build the North America basemap.
+
+```{r}
+# Join lon/lat onto the delta table
+cells <- coords[, .(cell, lon, lat)][cells, on = "cell", nomatch = 0]
+
+north_america <- ne_countries(
+  continent   = "North America",
+  scale       = "medium",
+  returnclass = "sf"
+)
+```
+
+---
+
+## Load the EPA Level III North America ecoregion shapefile and reproject to WGS84.
+
+```{r}
+# Read shapefile and reproject from Lambert Azimuthal Equal Area to WGS84
+ecoregions <- st_read(file.path(eco_dir, "NA_CEC_Eco_Level3.shp"), quiet = TRUE)
+ecoregions <- st_transform(ecoregions, crs = 4326)
+
+# Disable s2 spherical geometry and repair any invalid polygons before spatial join
+sf::sf_use_s2(FALSE)
+ecoregions <- st_make_valid(ecoregions)
+```
+
+---
+
+## Spatially join all cells to ecoregions and compute mean delta per ecoregion.
+
+```{r}
+# Convert all cell coordinates to an sf points object
+cells_sf <- st_as_sf(cells, coords = c("lon", "lat"), crs = 4326)
+
+# Spatial join: assign each cell to the ecoregion polygon it falls within
+cells_eco_all <- st_join(cells_sf, ecoregions[, c("NA_L3CODE", "NA_L3NAME")], join = st_within)
+
+# Compute mean delta and 95% CI per ecoregion from all cells
+eco_delta_all <- as.data.table(cells_eco_all)[!is.na(NA_L3CODE), .(
+  mean_delta = mean(delta),
+  ci95       = qt(0.975, df = .N - 1) * sd(delta) / sqrt(.N),
+  n_cells    = .N
+), by = .(NA_L3CODE, NA_L3NAME)]
+
+cat(sprintf("Ecoregions with cells: %d\n", nrow(eco_delta_all)))
+cat(sprintf("  Positive mean delta (phenology hurts on balance): %d\n", sum(eco_delta_all$mean_delta > 0)))
+cat(sprintf("  Negative mean delta (phenology helps on balance): %d\n", sum(eco_delta_all$mean_delta < 0)))
+cat(sprintf("  Range of mean delta: %.4f to %.4f\n", min(eco_delta_all$mean_delta), max(eco_delta_all$mean_delta)))
+
+eco_delta_all[, ecoregion := paste0(NA_L3CODE, " - ", NA_L3NAME)]
+fwrite(eco_delta_all[, .(ecoregion, mean_delta, ci95, n_cells)][order(-mean_delta)],
+       file.path(save_dir, "ecoregion_mean_delta.csv"))
+```
+
+---
+
+## Summarise ecoregion-level delta: counts of ecoregions with positive and negative mean delta, broken down by whether the 95% CI excludes zero.
+
+```{r}
+n_total   <- nrow(eco_delta_all)
+n_pos     <- sum(eco_delta_all$mean_delta > 0)
+n_pos_sig <- sum(eco_delta_all$mean_delta > 0 & eco_delta_all$mean_delta - eco_delta_all$ci95 > 0)
+n_neg     <- sum(eco_delta_all$mean_delta < 0)
+n_neg_sig <- sum(eco_delta_all$mean_delta < 0 & eco_delta_all$mean_delta + eco_delta_all$ci95 < 0)
+
+summary_table <- data.frame(
+  Direction = c(
+    "Positive mean δ (phenology worsens predictions)",
+    "Negative mean δ (phenology improves predictions)"
+  ),
+  `Total ecoregions` = c(n_pos, n_neg),
+  `Significant (95% CI excludes zero)` = c(n_pos_sig, n_neg_sig),
+  `% Significant` = round(c(n_pos_sig / n_pos, n_neg_sig / n_neg) * 100, 1),
+  check.names = FALSE
+)
+
+cat(sprintf("Total ecoregions: %d\n", n_total))
+cat(sprintf("Overall mean delta across all ecoregions: %.4f\n\n", mean(eco_delta_all$mean_delta)))
+
+fwrite(summary_table, file.path(save_dir, "ecoregion_delta_summary.csv"))
+
+knitr::kable(summary_table, align = c("l", "r", "r", "r"),
+             caption = "Summary of ecoregion-level mean delta. Significance is assessed by whether the 95% CI of the mean (t-distribution) excludes zero.")
+```
+
+---
+
+## Plot ecoregion choropleth — mean delta per ecoregion across all cells.
+
+```{r fig.width=10.12, fig.height=6.69}
+eco_map_all <- merge(ecoregions, eco_delta_all[, .(NA_L3CODE, mean_delta, n_cells)],
+                     by = "NA_L3CODE", all.x = TRUE)
+
+p_eco_choropleth_all <- ggplot() +
+  geom_sf(data = north_america, fill = "grey85", colour = "grey60", linewidth = 0.2) +
+  geom_sf(data = eco_map_all, aes(fill = mean_delta), colour = "grey30", linewidth = 0.2) +
+  coord_sf(
+    xlim   = c(-180, -40),
+    ylim   = c(7, 80),
+    expand = FALSE,
+    datum  = sf::st_crs(4326)
+  ) +
+  scale_fill_gradientn(
+    name    = "Mean Delta",
+    colours = c("darkgreen", "#ccffcc", "#ffcccc", "red"),
+    values  = scales::rescale(c(-0.125, -1e-9, 1e-9, 0.125),
+                              from = c(-0.125, 0.125)),
+    limits  = c(-0.125, 0.125),
+    na.value = "grey85"
+  ) +
+  labs(x = "Longitude", y = "Latitude") +
+  annotation_scale(location = "bl", width_hint = 0.25) +
+  annotation_north_arrow(
+    location = "br", which_north = "true",
+    style    = north_arrow_fancy_orienteering()
+  ) +
+  theme_bw(base_size = 12) +
+  theme(panel.grid.minor = element_blank())
+
+p_eco_choropleth_all
+```
+
+---
+
+## Save the ecoregion choropleth as a PNG and PDF.
+
+```{r}
+ggsave(file.path(save_dir, "phenology_contribution_map_ecoregions_all.png"),
+       plot   = p_eco_choropleth_all,
+       width  = 10,
+       height = 7,
+       dpi    = 300)
+```
+
+---
+
+## Plot a violin panel for the 8 ecoregions with a significant negative mean delta (95% CI excludes zero).
+
+```{r fig.width=20, fig.height=13}
+shorten_name <- function(x) trimws(gsub(" with .*$", "", x))
+
+# Ecoregions where phenology significantly improves predictions (95% CI wholly negative), most negative first
+neg_sig <- eco_delta_all[mean_delta < 0 & mean_delta + ci95 < 0][order(mean_delta)][seq_len(min(8, .N))]
+
+neg_sig[, plot_name := shorten_name(NA_L3NAME)]
+neg_sig[, eco_label := factor(
+  paste0(NA_L3CODE, " - ", plot_name),
+  levels = paste0(NA_L3CODE, " - ", plot_name)[order(mean_delta)]
+)]
+
+cells_sub <- as.data.table(cells_eco_all)[NA_L3NAME %in% neg_sig$NA_L3NAME & !is.na(NA_L3NAME)]
+cells_sub[neg_sig, eco_label := i.eco_label, on = "NA_L3NAME"]
+
+lbl <- cells_sub[, .(
+  n          = .N,
+  mean_delta = mean(delta),
+  sd_delta   = sd(delta),
+  ci95       = qt(0.975, df = .N - 1) * sd(delta) / sqrt(.N),
+  y_max      = max(delta),
+  y_min      = min(delta)
+), by = eco_label]
+lbl[, label_top    := sprintf("Mean = %.4f\n95%% CI ± %.4f", mean_delta, ci95)]
+lbl[, label_bottom := sprintf("cells = %d\nSD = %.4f", n, sd_delta)]
+
+p_eco_violin <- ggplot(cells_sub, aes(x = eco_label, y = delta)) +
+  geom_violin(fill = "#ccffcc", colour = "grey40", linewidth = 0.3, scale = "width", width = 0.7) +
+  stat_summary(fun.data = mean_cl_normal, fun.args = list(conf.int = 0.95),
+               geom = "errorbar", colour = "darkgreen", width = 0.15, linewidth = 0.6) +
+  stat_summary(fun = mean, geom = "point", colour = "darkgreen", size = 2.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey40", linewidth = 0.5) +
+  scale_y_continuous(limits = c(-1.0, 1.0), expand = expansion(0)) +
+  geom_text(data = lbl, aes(x = eco_label, y = y_max, label = label_top),
+            vjust = -0.8, size = 4.8, lineheight = 1.3, colour = "grey20") +
+  geom_text(data = lbl, aes(x = eco_label, y = y_min, label = label_bottom),
+            vjust = 1.6, size = 4.8, lineheight = 1.3, colour = "grey20") +
+  labs(x = NULL, y = "Delta (|combined residual| − |climate residual|)") +
+  theme_bw(base_size = 16) +
+  theme(panel.grid.minor  = element_blank(),
+        axis.text.x       = element_text(size = 15, angle = 50, hjust = 1, face = "bold"),
+        axis.text.y       = element_text(face = "bold"),
+        axis.title.y      = element_text(size = 18))
+
+p_eco_violin
+```
+
+---
+
+## Save the ecoregion violin plot as a PNG.
+
+```{r}
+ggsave(file.path(save_dir, "phenology_contribution_ecoregion_violin.png"),
+       plot   = p_eco_violin,
+       width  = 20,
+       height = 13,
+       dpi    = 300)
+```
+
+---
+
+```{r}
+citation("Hmisc")
+```
+

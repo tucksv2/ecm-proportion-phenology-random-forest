@@ -1,0 +1,163 @@
+---
+title: "Phenology Contribution — Histogram"
+output: html_document
+---
+
+This notebook plots the distribution of per-cell delta values, where delta = |combined residual| − |climate residual| averaged across all 100 model runs. A negative delta indicates phenology improved predictions; a positive delta indicates it added noise.
+
+---
+
+## Load packages.
+
+```{r}
+library(data.table)
+library(ggplot2)
+```
+
+---
+
+## Define file paths.
+
+```{r}
+model_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+save_dir  <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/PhenologyContributionMap'
+```
+
+---
+
+## Load model predictions.
+
+```{r}
+climate_preds  <- fread(file.path(model_dir, "AllClimateModelPredictions.csv"))
+combined_preds <- fread(file.path(model_dir, "AllCombinedModelPredictions.csv"))
+```
+
+---
+
+## Join predictions at the run level, compute per-run delta, and average to cell level.
+
+```{r}
+# Join on both cell and run so each row is one run's prediction for one cell
+runs <- climate_preds[combined_preds[, .(run, cell, predicted_combined = predicted)],
+                      on = .(run, cell), nomatch = 0]
+
+runs[, abs_resid_climate  := abs(observed - predicted)]
+runs[, abs_resid_combined := abs(observed - predicted_combined)]
+runs[, delta_run          := abs_resid_combined - abs_resid_climate]
+
+# Average per-run delta per cell
+cells <- runs[, .(
+  observed           = mean(observed),
+  predicted_climate  = mean(predicted),
+  predicted_combined = mean(predicted_combined),
+  delta              = mean(delta_run)
+), by = cell]
+```
+
+---
+
+## Summary statistics for delta across all GFBI forest cells, including cell-level improvement and worsening rates.
+
+```{r}
+n      <- nrow(cells)
+se     <- sd(cells$delta) / sqrt(n)
+t_crit <- qt(0.975, df = n - 1)
+ci_lo  <- mean(cells$delta) - t_crit * se
+ci_hi  <- mean(cells$delta) + t_crit * se
+
+delta_summary <- data.frame(
+  Statistic = c(
+    "Cells where phenology improves predictions (delta < 0)",
+    "Cells where phenology worsens predictions (delta > 0)",
+    "Mean delta",
+    "95% CI (mean)",
+    "Median delta",
+    "SD delta",
+    "Min delta",
+    "Max delta"
+  ),
+  Value = c(
+    sprintf("%d (%.1f%%)", sum(cells$delta < 0), mean(cells$delta < 0) * 100),
+    sprintf("%d (%.1f%%)", sum(cells$delta > 0), mean(cells$delta > 0) * 100),
+    sprintf("%.4f", mean(cells$delta)),
+    sprintf("[%.4f, %.4f]", ci_lo, ci_hi),
+    sprintf("%.4f", median(cells$delta)),
+    sprintf("%.4f", sd(cells$delta)),
+    sprintf("%.4f", min(cells$delta)),
+    sprintf("%.4f", max(cells$delta))
+  )
+)
+
+fwrite(delta_summary, file.path(save_dir, "histogram_delta_summary.csv"))
+
+knitr::kable(delta_summary, align = c("l", "r"),
+             caption = "Summary statistics for cell-level delta (|combined residual| − |climate residual|) across all GFBI forest cells. 95% CI on the mean computed using the t-distribution.")
+```
+
+---
+
+## Plot a histogram of delta values. Green bars indicate cells where phenology improved predictions; red bars where it worsened them.
+
+```{r fig.width=10, fig.height=5}
+x_lim <- 0.7
+
+delta_mean   <- mean(cells$delta)
+delta_median <- median(cells$delta)
+pct_pos      <- mean(cells$delta > 0) * 100
+pct_neg      <- mean(cells$delta < 0) * 100
+
+left_label  <- sprintf("%.1f%% cells where phenology improves predictions (green) \n%.1f%% cells where phenology worsens predictions (red)", pct_neg, pct_pos)
+right_label <- sprintf(
+  "Mean delta = %.4f\n95%% CI = [%.4f, %.4f]\nMedian delta = %.4f\nSD = %.4f\nMin = %.4f\nMax = %.4f",
+  delta_mean, ci_lo, ci_hi, delta_median, sd(cells$delta), min(cells$delta), max(cells$delta)
+)
+
+p_hist <- ggplot(cells, aes(x = delta, fill = after_stat(x))) +
+  geom_histogram(
+    binwidth  = 0.01,
+    boundary  = 0,
+    linewidth = 0.3
+  ) +
+  geom_rug(sides = "b", alpha = 0.15, linewidth = 0.3, colour = "grey40") +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             colour = "grey30", linewidth = 0.7) +
+  scale_fill_gradientn(
+    colours = c("darkgreen", "#ccffcc", "#ffcccc", "red"),
+    values  = c(0, 0.5 - 1e-6, 0.5 + 1e-6, 1),
+    limits  = c(-x_lim, x_lim)
+  ) +
+  coord_cartesian(xlim = c(-x_lim, x_lim)) +
+  annotate("text", x = -x_lim + 0.01, y = Inf, label = left_label,
+           hjust = 0, vjust = 2.0, size = 3.5, colour = "black",
+           fontface = "plain", lineheight = 1.5) +
+  annotate("text", x = x_lim - 0.01, y = Inf, label = right_label,
+           hjust = 1, vjust = 1.5, size = 3.5, colour = "black",
+           fontface = "plain", lineheight = 1.5) +
+  labs(
+    x = "Delta (|combined model residual| − |climate model residual|)",
+    y = "Number of GFBI Forest Cells"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position  = "none"
+  )
+
+p_hist
+```
+
+
+
+---
+
+## Save the histogram as a PNG.
+
+```{r}
+ggsave(file.path(save_dir, "phenology_contribution_histogram.png"),
+       plot   = p_hist,
+       width  = 10,
+       height = 5,
+       dpi    = 300)
+```
+
+---
