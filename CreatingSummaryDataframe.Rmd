@@ -1,0 +1,72 @@
+---
+title: "Creating a Summary Dataframe"
+output: html_document
+---
+
+This notebook summarises the per-year phenology columns in the combined dataset into per-metric mean and standard deviation columns, reducing the 190 phenology variables (19 metrics × 10 years, 2013–2022) down to 38 summary columns (19 metrics × mean + SD). The input is the combined dataframe produced by the *Creating a Combined Dataframe* notebook.
+
+The 19 WorldClim bioclimate variables and cell identifier columns are carried over from the combined dataframe unchanged. The final table is column-ordered as cell identifiers → phenology summaries → climate variables, and exported as a CSV for use in downstream analyses.
+
+---
+
+## Load the packages required for data manipulation.
+
+```{r}
+library(data.table)
+library(dplyr)
+```
+
+---
+
+## Read in the raw combined dataframe produced by the *Creating a Combined Dataframe* notebook.
+
+```{r}
+combined_df <- fread('/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing/Raw_Combined_Data.csv')
+```
+
+---
+
+## Identify phenology columns and initialise the summary dataframe with all non-phenology columns as a base.
+
+```{r}
+pheno_cols  <- grep("\\s\\d{4}$", names(combined_df), value = TRUE)
+non_pheno   <- setdiff(names(combined_df), pheno_cols)
+meansd_df   <- combined_df[, ..non_pheno]
+```
+
+---
+
+## Compute row-wise mean and SD across the 10 yearly observations for each phenology metric, then reorder columns to: cell identifiers → phenology summaries → BIO climate variables.
+
+```{r}
+# Remove year suffix (e.g. " 2013") to define metric groups
+metric_names <- sub("\\s\\d{4}$", "", pheno_cols)
+
+# Split phenology columns into groups by metric
+groups <- split(pheno_cols, metric_names)
+
+# Loop through each metric group and compute row-wise mean and SD across years
+for (metric in names(groups)) {
+  cols <- groups[[metric]]
+  meansd_df[[paste0(metric, " Mean")]] <- rowMeans(combined_df[, ..cols], na.rm = TRUE)
+  meansd_df[[paste0(metric, " SD")]]   <- apply(combined_df[, ..cols], 1, sd, na.rm = TRUE)
+}
+
+# Reorder columns: cell, n_stems, propEcM, pheno summary cols, BIO cols
+base_cols  <- c("cell", "n_stems_total", "propEcM")
+bio_cols   <- grep("^BIO_", names(meansd_df), value = TRUE)
+new_pheno  <- setdiff(names(meansd_df), c(base_cols, bio_cols))
+
+setcolorder(meansd_df, c(base_cols, new_pheno, bio_cols))
+
+dim(meansd_df)
+head(meansd_df)
+```
+
+---
+
+## Export the summary dataframe as a CSV for use in downstream analyses.
+
+```{r}
+fwrite(meansd_df, '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Data Processing/Summary_Combined_Data.csv')
+```
