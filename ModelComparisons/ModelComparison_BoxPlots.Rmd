@@ -1,0 +1,156 @@
+---
+title: "Model Comparison - R² and RMSE Plots"
+output: html_document
+---
+
+This notebook loads per-run statistics from the three main 100-run random forest models (climate, phenology, and combined) and produces point-range plots comparing their performance. Mean R² and RMSE with SD and 95% confidence intervals are computed across the 100 runs for each model and summarised in a table. R² and RMSE are visualised as separate point-range plots.
+
+The residual model is excluded from all comparisons as its response variable (`residualEcM`) is on a different scale to the other three models, making direct comparison of R² and RMSE uninformative. Its performance statistics are summarised in a separate table.
+
+---
+
+## Load the packages required for data handling and plotting.
+
+```{r}
+library(data.table)
+library(ggplot2)
+
+options(scipen = 999) # suppress scientific notation in printed output
+```
+
+---
+
+## Read in per-run statistics from all four models, assign model labels, and compute RMSE.
+
+```{r}
+pull_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+save_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/ModelComparison'
+
+# Read per-run stats from each model
+climate_stats  <- fread(file.path(pull_dir, "AllClimateModelStats.csv"))
+pheno_stats    <- fread(file.path(pull_dir, "AllPhenoModelStats.csv"))
+combined_stats <- fread(file.path(pull_dir, "AllCombinedModelStats.csv"))
+residual_stats <- fread(file.path(pull_dir, "AllResidualModelStats.csv"))
+
+# Assign model labels and compute RMSE
+climate_stats[,  `:=`(Model = "Climate",   RMSE = sqrt(prediction_error))]
+pheno_stats[,    `:=`(Model = "Phenology", RMSE = sqrt(prediction_error))]
+combined_stats[, `:=`(Model = "Combined",  RMSE = sqrt(prediction_error))]
+residual_stats[, `:=`(Model = "Residual",  RMSE = sqrt(prediction_error))]
+```
+
+---
+
+## Combine stats and summarise mean, SD, and 95% CI across the 100 runs per model.
+
+```{r}
+all_stats <- rbindlist(list(climate_stats, pheno_stats, combined_stats, residual_stats),
+                       fill = TRUE)
+all_stats[, Model := factor(Model, levels = c("Phenology", "Climate", "Combined", "Residual"))]
+
+summary_stats <- all_stats[, .(
+  N         = .N,
+  Mean_R2   = round(mean(r_squared), 5),
+  SD_R2     = round(sd(r_squared),   5),
+  CI95_R2   = round(qt(0.975, df = .N - 1) * sd(r_squared) / sqrt(.N), 5),
+  Mean_RMSE = round(mean(RMSE), 5),
+  SD_RMSE   = round(sd(RMSE),   5),
+  CI95_RMSE = round(qt(0.975, df = .N - 1) * sd(RMSE) / sqrt(.N), 5)
+), by = Model]
+
+summary_stats[, Model := factor(Model, levels = c("Phenology", "Climate", "Combined", "Residual"))]
+summary_stats <- summary_stats[order(Model)]
+```
+
+---
+
+## Split into main model table (climate, phenology, combined) and residual table.
+
+```{r}
+main_summary     <- summary_stats[Model != "Residual"]
+main_summary[,   Model := factor(Model, levels = c("Phenology", "Climate", "Combined"))]
+residual_summary <- summary_stats[Model == "Residual"]
+
+cat("=== Main Model Comparison ===\n")
+print(main_summary)
+
+cat("\n=== Residual Model Summary ===\n")
+print(residual_summary)
+```
+
+---
+
+## Export both summary tables as CSVs.
+
+```{r}
+fwrite(main_summary,     file.path(save_dir, "ModelComparison_Summary.csv"))
+fwrite(residual_summary, file.path(save_dir, "ResidualModel_Summary.csv"))
+```
+
+---
+
+## Plot mean R² ± 95% CI for the three main models. Mean R² values are labelled above each point.
+
+```{r}
+r2_plot <- ggplot(main_summary, aes(x = Model, y = Mean_R2, colour = Model)) +
+  geom_point(size = 3, shape = 21, fill = "white") +
+  geom_errorbar(aes(ymin = Mean_R2 - CI95_R2, ymax = Mean_R2 + CI95_R2),
+                width = 0.2, linewidth = 0.8) +
+  geom_text(aes(label = round(Mean_R2, 3)), vjust = -1, size = 3.5, colour = "black") +
+  scale_colour_brewer(palette = "Set2", guide = "none") +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(x = "Model", y = "R²") +
+  theme_minimal() +
+  theme(
+    axis.line         = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks        = element_line(colour = "black"),
+    axis.ticks.length = unit(3, "pt")
+  )
+
+print(r2_plot)
+```
+
+---
+
+## Export the R² comparison plot as a PNG.
+
+```{r}
+ggsave(file.path(save_dir, "ModelComparison_R2_Plot.png"),
+       plot   = r2_plot,
+       width  = 6,
+       height = 5)
+```
+
+---
+
+## Plot mean RMSE ± 95% CI for the three main models. Mean RMSE values are labelled above each point.
+
+```{r}
+rmse_plot <- ggplot(main_summary, aes(x = Model, y = Mean_RMSE, colour = Model)) +
+  geom_point(size = 3, shape = 23, fill = "white") +
+  geom_errorbar(aes(ymin = Mean_RMSE - CI95_RMSE, ymax = Mean_RMSE + CI95_RMSE),
+                width = 0.2, linewidth = 0.8) +
+  geom_text(aes(label = round(Mean_RMSE, 3)), vjust = -1, size = 3.5, colour = "black") +
+  scale_colour_brewer(palette = "Set2", guide = "none") +
+  coord_cartesian(ylim = c(0.0, 0.3)) +
+  labs(x = "Model", y = "RMSE") +
+  theme_minimal() +
+  theme(
+    axis.line         = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks        = element_line(colour = "black"),
+    axis.ticks.length = unit(3, "pt")
+  )
+
+print(rmse_plot)
+```
+
+---
+
+## Export the RMSE comparison plot as a PNG.
+
+```{r}
+ggsave(file.path(save_dir, "ModelComparison_RMSE_Plot.png"),
+       plot   = rmse_plot,
+       width  = 6,
+       height = 5)
+```

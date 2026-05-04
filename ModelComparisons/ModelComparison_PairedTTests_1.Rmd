@@ -1,0 +1,117 @@
+---
+title: "Model Comparison - Paired t-Tests"
+output: html_document
+---
+
+This notebook tests whether the three main random forest models (phenology, climate, and combined) differ significantly in predictive performance. Pairwise paired t-tests are conducted on OOB R² and RMSE across the 100 independent model runs.
+
+Tests are paired because all three models use an identical seed sequence — each run index therefore saw the same stochastic variation, making within-run differences between models directly comparable. Pairing removes seed-to-seed noise and isolates genuine performance differences between models.
+
+Three pairs are tested: Phenology vs Climate, Phenology vs Combined, and Climate vs Combined. As these three comparisons constitute a single family of tests addressing the same inferential question, Bonferroni correction is applied by multiplying each raw p-value by the number of comparisons (n = 3) per metric.
+
+---
+
+## Load the packages required for data handling.
+
+```{r}
+library(data.table)
+```
+
+---
+
+## Read in per-run statistics from the three main models and compute RMSE.
+
+```{r}
+pull_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/Models'
+save_dir <- '/Users/williamtucker/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Y4 BIOLOGY (2025-26)/Research Project/Data Analysis/ModelComparison'
+
+climate_stats  <- fread(file.path(pull_dir, "AllClimateModelStats.csv"))
+pheno_stats    <- fread(file.path(pull_dir, "AllPhenoModelStats.csv"))
+combined_stats <- fread(file.path(pull_dir, "AllCombinedModelStats.csv"))
+
+# Compute RMSE from OOB prediction error (MSE)
+climate_stats[,  RMSE := sqrt(prediction_error)]
+pheno_stats[,    RMSE := sqrt(prediction_error)]
+combined_stats[, RMSE := sqrt(prediction_error)]
+```
+
+---
+
+## Define a function to run a paired t-test and return a tidy summary row with a Bonferroni-corrected p-value.
+
+Bonferroni correction is applied by multiplying the raw p-value by the number of comparisons within each metric family (n_comparisons). The corrected p-value is capped at 1.
+
+```{r}
+paired_test <- function(x, y, label_x, label_y, metric, n_comparisons = 3) {
+
+  diffs  <- x - y
+  t_res  <- t.test(x, y, paired = TRUE)
+
+  # Bonferroni-corrected p-value (capped at 1)
+  p_bonferroni <- min(t_res$p.value * n_comparisons, 1)
+
+  # Significance stars computed while p_bonferroni is still numeric
+  sig_stars <- ifelse(p_bonferroni < 0.001, "***",
+               ifelse(p_bonferroni < 0.01,  "**",
+               ifelse(p_bonferroni < 0.05,  "*", "ns")))
+
+  data.frame(
+    Metric                  = metric,
+    "Comparison (A vs B)"   = paste0(label_x, " vs ", label_y),
+    "Mean_Diff (A - B)"     = round(mean(diffs), 5),
+    t_statistic             = round(t_res$statistic, 4),
+    df                      = t_res$parameter,
+    p_raw                   = formatC(t_res$p.value,  format = "e", digits = 3),
+    p_bonferroni            = formatC(p_bonferroni,   format = "e", digits = 3),
+    Significance            = sig_stars,
+    row.names               = NULL,
+    check.names             = FALSE
+  )
+}
+```
+
+---
+
+## Run pairwise paired t-tests on R² for all three model pairs.
+
+```{r}
+r2_tests <- rbindlist(list(
+  paired_test(pheno_stats$r_squared,   climate_stats$r_squared,  "Phenology", "Climate",  "R²"),
+  paired_test(pheno_stats$r_squared,   combined_stats$r_squared, "Phenology", "Combined", "R²"),
+  paired_test(climate_stats$r_squared, combined_stats$r_squared, "Climate",   "Combined", "R²")
+))
+
+print(r2_tests)
+```
+
+---
+
+## Run pairwise paired t-tests on RMSE for all three model pairs.
+
+```{r}
+rmse_tests <- rbindlist(list(
+  paired_test(pheno_stats$RMSE,   climate_stats$RMSE,   "Phenology", "Climate",  "RMSE"),
+  paired_test(pheno_stats$RMSE,   combined_stats$RMSE,  "Phenology", "Combined", "RMSE"),
+  paired_test(climate_stats$RMSE, combined_stats$RMSE,  "Climate",   "Combined", "RMSE")
+))
+
+print(rmse_tests)
+```
+
+---
+
+## Combine R² and RMSE results into a single summary table and export.
+
+Significance stars are computed within the paired_test function based on Bonferroni-corrected p-values.
+
+```{r}
+all_tests <- rbindlist(list(r2_tests, rmse_tests))
+
+print(all_tests)
+
+fwrite(all_tests, file.path(save_dir, "ModelComparison_PairedTTests.csv"))
+```
+
+```{r}
+sessionInfo()
+```
